@@ -70,8 +70,42 @@ body.noglosses .tile .g { display: none; }
 #menu .panel { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px, 92vw); background: var(--bg); padding: 16px; overflow: auto; }
 #menu h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0 6px; text-transform: none; }
 #menu .panel > button, #menu .list button { display: block; width: 100%; text-align: left; margin: 4px 0; }
-.preview { font-size: 12px; color: var(--accent); margin-bottom: 4px; }
 .countdown { text-align: center; font-size: 40px; color: var(--muted); margin: 40px 0; }
 
 .gate { max-width: 340px; margin: 22vh auto 0; }
 .gate input { width: 100%; font: inherit; font-size: 18px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+
+.zh { font-family: var(--zh); }
+.big { cursor: default; }
+button.wide { display: block; width: 100%; margin-top: 8px; padding: 10px; text-align: center; color: var(--muted); }
+button.idk { display: block; margin: 18px auto 0; border: 1px solid var(--badbg); background: none; color: var(--bad); font: inherit; font-size: 14px;
+  padding: 7px 16px; border-radius: 999px; cursor: pointer; }
+button.idk:hover { background: var(--badbg); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+.chip { font-size: 22px; padding: 8px 12px; border: 1px solid var(--line); border-bottom-width: 3px; border-radius: 8px; background: var(--card); color: var(--fg); cursor: pointer; }
+.chip.easy { background: var(--okbg); border-color: var(--ok); color: var(--ok); }
+.chip.unknown { background: var(--badbg); border-color: var(--bad); color: var(--bad); }
+.easytxt { color: var(--ok); font-weight: 600; }
+.unktxt { color: var(--bad); font-weight: 600; }
+
+.parts { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 0 2px; }
+.part { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.part.good { background: var(--okbg); border-color: var(--okbg); color: var(--ok); }
+.part.said { border-color: var(--ok); color: var(--ok); border-style: dashed; }
+.part.slip { background: #fbf1d5; border-color: #fbf1d5; color: #8a6510; }
+.part.bad { background: var(--badbg); border-color: var(--badbg); color: var(--bad); }
+.wordcard .flags { margin-top: 8px; }
+.counts div { margin: 1px 0; }
+
+#toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: min(92vw, 560px); background: var(--fg); color: #fff;
+  padding: 9px 14px; border-radius: 8px; font-size: 14px; z-index: 30; box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+#toast b { font-weight: 500; font-size: 17px; }
+#toast button { margin-left: 12px; background: none; border: 0; color: #9ec1ff; font: inherit; cursor: pointer; text-decoration: underline; }
+#wordmenu { position: fixed; z-index: 40; background: var(--card); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
+  padding: 4px; min-width: 210px; max-width: 300px; }
+#wordmenu .head { padding: 7px 10px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); margin-bottom: 2px; }
+#wordmenu .head b { color: var(--fg); font-weight: 500; font-size: 18px; }
+#wordmenu button { display: block; width: 100%; text-align: left; border: 0; background: none; font: inherit; font-size: 14px; padding: 8px 10px; border-radius: 6px; cursor: pointer; color: var(--fg); }
+#wordmenu button:hover { background: var(--unkbg); }
+.tile, .tok, .chip, .choice.zh { -webkit-touch-callout: none; }

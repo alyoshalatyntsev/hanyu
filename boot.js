@@ -4,6 +4,7 @@
   'use strict';
   const DATA_REPO = 'alyoshalatyntsev/hanyu-data', DATA_PATH = 'data.json';
   const TOKEN_KEY = 'hanyu-token';
+  const DATA_VERSION = 2;      // the shape of data.json this release understands
   const LOCAL = (location.protocol === 'file:' || ['localhost', '127.0.0.1'].includes(location.hostname)) &&
     !new URLSearchParams(location.search).has('gate');
   const main = document.getElementById('main');
@@ -82,22 +83,29 @@
 
   async function boot() {
     if (LOCAL) { await script('private/data.js'); return start(window.DATA); }
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+    if ('serviceWorker' in navigator) {
+      const had = !!navigator.serviceWorker.controller;      // a new release took over: reload once to run it
+      navigator.serviceWorker.addEventListener('controllerchange', () => { if (had) location.reload(); });
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return gate();
     const cached = await cacheGet();
-    if (cached) {
+    if (cached && cached.data && cached.data.v === DATA_VERSION) {
       await start(cached.data);
       // pick up a newer data file for next time; a dead token or no network never blocks practice
-      fetchData(token, cached.etag).then(got => got && cacheSet(got)).catch(() => {});
+      fetchData(token, cached.etag).then(got => got && got.data.v === DATA_VERSION && cacheSet(got)).catch(() => {});
       return;
     }
     try {
       const got = await fetchData(token);
+      if (got.data.v !== DATA_VERSION) throw new Error('data version');
       await cacheSet(got);
       await start(got.data);
     } catch (err) {
-      gate(err.status ? 'The saved token no longer works. Paste a new one.' : 'Could not reach GitHub. Check the connection and try again.');
+      gate(err.status ? 'The saved token no longer works. Paste a new one.'
+        : err.message === 'data version' ? 'The word data on GitHub does not match this version of the app.'
+        : 'Could not reach GitHub. Check the connection and try again.');
     }
   }
   boot();
