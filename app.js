@@ -17,14 +17,64 @@
   order.forEach((w, i) => { w.rank = i; });
   const rankOf = w => (byWord[w] && byWord[w].rank != null) ? byWord[w].rank : 100000 + (byWord[w] ? byWord[w].i : 0);
 
-  // ---------- what is saved: the list of events, plus a little about where the stream is ----------
+  // ---------- what is saved ----------
+  // `st` is where this device is in the stream. `events` is the record of everything done, on any device.
+  // Events live in the browser's database; a small tail in localStorage covers the moment between an answer
+  // and its write, so closing the page loses nothing.
   let st = load();
   function load() {
     let s = null;
     try { s = JSON.parse(localStorage.getItem(KEY)); } catch (e) { /* start fresh */ }
-    return Object.assign({ events: [], counter: 0, retry: [], recent: [], turn: 0, glosses: false }, s || {});
+    s = Object.assign({ counter: 0, retry: [], recent: [], turn: 0, glosses: false, seq: 0 }, s || {});
+    s.sync = Object.assign({ seen: {}, pushed: {} }, s.sync || {});
+    if (!s.dev) s.dev = Math.random().toString(36).slice(2, 8);       // this device's name in the shared record
+    return s;
   }
   function save() { localStorage.setItem(KEY, JSON.stringify(st)); }
+  let events = [];
+  const TAIL = 'hanyu-tail';
+  let tail = [];
+  try { tail = JSON.parse(localStorage.getItem(TAIL)) || []; } catch (e) { tail = []; }
+  const saveTail = () => localStorage.setItem(TAIL, JSON.stringify(tail));
+  const byTime = (a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  let dbp = null;
+  function db() {
+    return dbp || (dbp = new Promise((res, rej) => {
+      const o = indexedDB.open('hanyu-log', 1);
+      o.onupgradeneeded = () => o.result.createObjectStore('ev', { keyPath: 'id' });
+      o.onerror = () => rej(o.error);
+      o.onsuccess = () => res(o.result);
+    }));
+  }
+  function dbPut(list) {
+    return db().then(d => new Promise((res, rej) => {
+      const tx = d.transaction('ev', 'readwrite'), os = tx.objectStore('ev');
+      list.forEach(e => os.put(e));
+      tx.oncomplete = () => res(); tx.onerror = tx.onabort = () => rej(tx.error);
+    }));
+  }
+  function dbAll() {
+    return db().then(d => new Promise((res, rej) => {
+      const q = d.transaction('ev', 'readonly').objectStore('ev').getAll();
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    }));
+  }
+  function persist(list) {     // whatever the database has not confirmed stays in the tail
+    const ids = new Set(list.map(e => e.id));
+    list.forEach(e => { if (!tail.some(x => x.id === e.id)) tail.push(e); });
+    saveTail();
+    return dbPut(list).then(() => { tail = tail.filter(e => !ids.has(e.id)); saveTail(); }).catch(() => {});
+  }
+  async function loadEvents() {
+    let stored = [];
+    try { stored = await dbAll(); } catch (e) { stored = []; }
+    const have = new Set(stored.map(e => e.id)), extra = [];
+    (st.events || []).forEach((e, i) => { if (!e.id) e.id = st.dev + '-m' + i; });       // from the release that kept events in localStorage
+    (st.events || []).concat(tail).forEach(e => { if (!have.has(e.id)) { have.add(e.id); extra.push(e); } });
+    events = stored.concat(extra).sort(byTime);
+    if (extra.length) await persist(extra);
+    if (st.events) { delete st.events; save(); }
+  }
 
   // ---------- the picture of what you know: always rebuilt from the events ----------
   let K;
@@ -38,8 +88,10 @@
       due: new Date(+time + days * 43200000) });
     return { card: c, right: 0, wrong: 0, src: 'said' };
   }
+  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {} });
   function apply(ev) {
     const time = new Date(ev.t);
+    if (ev.k === 'reset') { K = blank(); return; }       // start again from nothing; what came before stays in the record
     if (ev.k === 'sorted') { ev.ws.forEach(w => { K.sorted[w] = true; }); return; }
     if (ev.k === 'flag') { if (ev.flag === 'bad sentence' && ev.sid) { if (ev.on) K.retired[ev.sid] = true; else delete K.retired[ev.sid]; } return; }
     if (!ev.w) return;
@@ -47,10 +99,12 @@
     if (ev.k === 'mark') {
       if (ev.id) K.imported[ev.id] = true;
       if (ev.v === 'easy') {
+        if (r.mark === 'easy') return;       // already so (the same mark can arrive twice, from two devices)
         r.mark = 'easy'; r.stage = 'none'; r.diag = null;
         ['m', 's', 'r', 'u'].forEach(p => { r.parts[p] = prior(365, time); });
         r.parts.t = prior(90, time);       // tones are the part people are least aware of not knowing: checked sooner
       } else if (ev.v === 'unknown') {
+        if (r.mark === 'unknown' && r.stage === 'wait') return;
         r.mark = 'unknown'; r.parts = {}; r.stage = 'wait'; r.knows = false; r.intro = 0; r.diag = null;
       } else if (ev.v === 'clear') {
         if (r.mark === 'easy') Object.keys(r.parts).forEach(p => { if (r.parts[p].src === 'said') delete r.parts[p]; });
@@ -100,12 +154,95 @@
     if (ev.part) r.cyc[ev.part] = (r.cyc[ev.part] || 0) + 1;     // how many times each kind of step has been done, to rotate tasks
   }
   function rebuild() {
-    K = { w: {}, sent: {}, retired: {}, sorted: {}, imported: {} };
-    st.events.forEach(apply);
+    K = blank();
+    events.forEach(apply);
   }
-  function log(ev) { ev.t = new Date().toISOString(); st.events.push(ev); apply(ev); save(); return ev; }
-  rebuild();
-  (D.marks || []).forEach(m => { const id = m.v + ':' + m.w; if (!K.imported[id]) log({ k: 'mark', w: m.w, v: m.v, src: 'import', id }); });
+  function log(ev) {
+    ev.t = new Date().toISOString(); ev.id = st.dev + '-' + (++st.seq);
+    events.push(ev); apply(ev); save();
+    persist([ev]); syncSoon();
+    return ev;
+  }
+  // lists you gave me, built into the data file: applied once, as marks
+  function applyImports() {
+    (D.marks || []).forEach(m => { const id = m.v + ':' + m.w; if (!K.imported[id]) log({ k: 'mark', w: m.w, v: m.v, src: 'import', id }); });
+  }
+
+  // ---------- sync: each device writes only its own files in the private repository and reads the others' ----------
+  const H = window.HANYU || {};
+  const canSync = () => !!(!H.local && H.token && H.token());
+  let syncing = null, syncTimer = null;
+  async function gh(method, path, opt) {
+    opt = opt || {};
+    const headers = { Authorization: 'Bearer ' + H.token(), Accept: opt.raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json' };
+    if (opt.body) headers['Content-Type'] = 'application/json';
+    const r = await fetch('https://api.github.com/repos/' + H.repo + '/' + path,
+      { method, headers, cache: 'no-store', body: opt.body ? JSON.stringify(opt.body) : undefined });
+    if (!r.ok) { const e = new Error('GitHub ' + r.status); e.status = r.status; throw e; }
+    return opt.raw ? r.text() : r.json();
+  }
+  function b64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(out);
+  }
+  const encPath = p => p.split('/').map(encodeURIComponent).join('/');
+  let onMerged = () => {};
+  function sync() {
+    if (!canSync()) return Promise.resolve(false);
+    if (syncing) return syncing;
+    syncing = (async () => {
+      try {
+        const tree = await gh('GET', 'git/trees/main?recursive=1');
+        const remote = {};
+        tree.tree.forEach(f => { if (f.type === 'blob' && /^log\/[^/]+\/[\d-]+\.jsonl$/.test(f.path)) remote[f.path] = f.sha; });
+        // read files that changed since last time
+        const have = new Set(events.map(e => e.id)), fresh = [];
+        for (const path of Object.keys(remote)) {
+          if (st.sync.seen[path] === remote[path]) continue;
+          const text = await gh('GET', 'contents/' + encPath(path), { raw: true });
+          text.split('\n').forEach(line => {
+            if (!line.trim()) return;
+            try { const e = JSON.parse(line); if (e.id && e.t && !have.has(e.id)) { have.add(e.id); fresh.push(e); } } catch (x) { /* skip a damaged line */ }
+          });
+          st.sync.seen[path] = remote[path];
+        }
+        if (fresh.length) {
+          events = events.concat(fresh).sort(byTime);
+          await persist(fresh);
+          rebuild();
+          onMerged();
+        }
+        // write this device's own events, one file per month
+        const mine = {};
+        events.forEach(e => { if (e.id.startsWith(st.dev + '-')) (mine[e.t.slice(0, 7)] = mine[e.t.slice(0, 7)] || []).push(e); });
+        for (const month of Object.keys(mine)) {
+          if (st.sync.pushed[month] === mine[month].length) continue;
+          const path = 'log/' + st.dev + '/' + month + '.jsonl';
+          const body = { message: 'sync ' + st.dev, branch: 'main', content: b64(mine[month].map(e => JSON.stringify(e)).join('\n') + '\n') };
+          if (remote[path]) body.sha = remote[path];
+          const out = await gh('PUT', 'contents/' + encPath(path), { body });
+          st.sync.seen[path] = out.content.sha;
+          st.sync.pushed[month] = mine[month].length;
+        }
+        st.sync.devices = new Set(Object.keys(remote).map(p => p.split('/')[1]).concat(Object.keys(mine).length ? [st.dev] : [])).size;
+        st.sync.last = new Date().toISOString(); st.sync.err = null;
+        return true;
+      } catch (e) {
+        st.sync.err = e.status === 401 ? 'the token was refused' : e.status === 403 || e.status === 404 ? 'the token cannot write to the data repository'
+          : e.status ? 'GitHub answered ' + e.status : 'no connection';
+        return false;
+      } finally { syncing = null; save(); }
+    })();
+    return syncing;
+  }
+  function syncSoon() { if (!canSync()) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, 20000); }
+  if (canSync()) {
+    setInterval(() => { if (document.visibilityState === 'visible') sync(); }, 300000);
+    document.addEventListener('visibilitychange', () => { sync(); });
+    window.addEventListener('online', () => { sync(); });
+  }
 
   // ---------- reading the picture ----------
   function retr(part, now) {
@@ -383,12 +520,13 @@
   const bigWord = (w, hide) => wordEl('div', w, null, { class: 'big', text: w }, null, hide);
   const idkButton = () => el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, '✗', el('span', { text: " I don't know" }));
 
+  let sortTouched = false;
   function showSort(batch) {
-    current = null;
+    current = null; idle = 'sort'; sortTouched = false;
     const state = {};   // word -> 'easy' | 'unknown'
     const chips = batch.map(w => {
       const c = el('button', { class: 'chip zh', text: w });
-      const set = v => { if (v) state[w] = v; else delete state[w]; c.className = 'chip zh' + (v ? ' ' + v : ''); };
+      const set = v => { sortTouched = true; if (v) state[w] = v; else delete state[w]; c.className = 'chip zh' + (v ? ' ' + v : ''); };
       c.addEventListener('click', e => {
         if (e.shiftKey) set(state[w] === 'unknown' ? null : 'unknown');
         else if (e.ctrlKey || e.metaKey) set(state[w] === 'easy' ? null : 'easy');
@@ -679,7 +817,8 @@
     idkNow = () => {};
     const it = nextItem();
     save();
-    if (it.done) { current = null; return screen('', el('p', { text: 'Nothing left to do right now.' })); }
+    idle = null;
+    if (it.done) { current = null; idle = 'done'; return screen('', el('p', { text: 'Nothing left to do right now.' })); }
     if (it.sort) return showSort(it.sort);
     if (it.intro) return showIntro(it.intro);
     if (it.start) { log({ k: 'start', w: it.start }); return advance(); }
@@ -694,7 +833,7 @@
       Object.keys(r.parts).forEach(p => { o.parts[PARTS[p]] = { chance: +retr(r.parts[p], now).toFixed(3), how: r.parts[p].src, right: r.parts[p].right, wrong: r.parts[p].wrong }; });
       picture[w] = o;
     });
-    const blob = new Blob([JSON.stringify({ exported: now.toISOString(), picture, events: st.events }, null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ exported: now.toISOString(), device: st.dev, picture, events }, null, 1)], { type: 'application/json' });
     const a = el('a', { href: URL.createObjectURL(blob), download: 'hanyu-' + today() + '.json' });
     document.body.append(a); a.click(); a.remove();
   }
@@ -710,7 +849,11 @@
         [['marked trivially easy', n('easy')], ['known (tested)', n('known')], ['being learned', n('learning')], ['waiting to be taught', n('wait')],
           ['being checked', n('checking')], ['not looked at yet', n('untouched')], ['not shown', n('drop')]].map(x => el('div', { text: x[1] + '  ' + x[0] })),
         below ? el('div', { text: below + '  lower-level words you marked or missed' }) : null,
-        el('div', { class: 'muted', text: st.events.filter(e => e.k === 'ans').length + ' answers recorded' })),
+        el('div', { class: 'muted', text: events.filter(e => e.k === 'ans').length + ' answers recorded' })),
+      canSync() ? el('div', { class: 'small muted syncline', text: st.sync.err ? 'Sync is not working: ' + st.sync.err + '. It will try again by itself.'
+        : st.sync.last ? 'Synced ' + new Date(st.sync.last).toLocaleString() + ' · ' + (st.sync.devices || 1) + (st.sync.devices > 1 ? ' devices' : ' device')
+        : 'Not synced yet' }) : el('div', { class: 'small muted syncline', text: 'This copy does not sync (opened from the folder).' }),
+      canSync() ? el('button', { class: 'plain', text: 'Sync now', onclick: () => { sync().then(openMenu); } }) : null,
       unsorted.length ? el('button', { class: 'plain', text: 'Sort another ' + Math.min(SORT_BATCH, unsorted.length) + ' words now',
         onclick: () => { $('menu').hidden = true; showSort(unsorted.slice(0, SORT_BATCH)); } }) : null,
       el('h3', { text: 'Data' }),
@@ -719,7 +862,11 @@
         if (confirm('Remove the token and the downloaded words from this device? Your progress stays.')) window.HANYU.forget();
       } }) : null,
       el('button', { class: 'plain', text: 'Reset all progress', onclick: () => {
-        if (confirm('Delete everything recorded on this device?')) { localStorage.removeItem(KEY); st = load(); rebuild(); $('menu').hidden = true; advance(); }
+        if (confirm('Start again from nothing, on every device? (The record of what you did is kept, but no longer counts.)')) {
+          log({ k: 'reset' });
+          Object.assign(st, { counter: 0, retry: [], recent: [], turn: 0 }); save();
+          applyImports(); $('menu').hidden = true; advance();
+        }
       } }),
       el('h3', { text: 'Where the content comes from' }),
       el('div', { class: 'small muted', text: 'Words, pinyin and definitions: official 2012 HSK lists as published at hskhsk.com (levels 1 to ' + D.level + '). Sentences: ' +
@@ -732,7 +879,22 @@
   $('menu').addEventListener('click', e => { if (e.target === $('menu')) $('menu').hidden = true; });
 
   document.body.classList.toggle('noglosses', !st.glosses);
-  window.__app = { state: () => st, picture: () => K, status, rebuild, advance,
-    current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done } };   // for testing
-  advance();
+  let idle = null;      // 'sort' | 'done' while a screen is up that newly arrived events could make stale
+  onMerged = () => { if (idle === 'done' || (idle === 'sort' && !sortTouched)) advance(); };
+  async function init() {
+    await loadEvents();
+    rebuild();
+    if (canSync() && !events.length) {       // a new device: fetch the history before showing anything
+      screen('', el('p', { class: 'muted', text: 'Getting your history…' }));
+      await Promise.race([sync(), new Promise(r => setTimeout(r, 8000))]);
+    } else if (canSync()) setTimeout(sync, 1500);
+    applyImports();
+    advance();
+  }
+  window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
+    ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
+    current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
+    // for testing: move everything recorded n days into the past
+    shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
+  window.__app.ready = init().then(() => { window.__app.started = true; });
 })();

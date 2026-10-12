@@ -45,7 +45,8 @@
 
   function start(data) {
     window.DATA = data;
-    window.HANYU = { local: LOCAL, forget: async () => { localStorage.removeItem(TOKEN_KEY); await cacheClear(); location.reload(); } };
+    window.HANYU = { local: LOCAL, repo: DATA_REPO, token: () => localStorage.getItem(TOKEN_KEY),
+      forget: async () => { localStorage.removeItem(TOKEN_KEY); await cacheClear(); location.reload(); } };
     return script('app.js');
   }
 

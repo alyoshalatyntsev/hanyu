@@ -1,6 +1,6 @@
 // Keeps the app's own files on the device so it opens without a network.
 // Answers from the copy on the device straight away and refreshes that copy in the background.
-const CACHE = 'hanyu-shell-v2';   // change this on every release so devices pick up the new files
+const CACHE = 'hanyu-shell-v3';   // change this on every release so devices pick up the new files
 const SHELL = ['./', 'index.html', 'style.css', 'boot.js', 'app.js', 'vendor/ts-fsrs.umd.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
