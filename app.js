@@ -88,7 +88,8 @@
       due: new Date(+time + days * 43200000) });
     return { card: c, right: 0, wrong: 0, src: 'said' };
   }
-  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {}, nAns: 0 });
+  const RUNG = { gap: 1, read: 1, tiles: 2, tilesType: 3, typedGap: 4, meaningToWord: 4, retype: 5, typeBack: 5 };
+  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {}, nAns: 0, ms: {} });
   // The scheduler counts days by the UTC calendar. Times are shifted so that its day turns over at 4 am local time
   // (tz = minutes behind UTC where the event happened; older events have none and are taken as China time).
   const schedTime = (iso, tz) => new Date(+new Date(iso) - ((tz == null ? -480 : tz) + 240) * 60000);
@@ -101,15 +102,16 @@
     if (!ev.w) return;
     const r = rec(ev.w);
     if (ev.k === 'mark') {
-      if (ev.id) K.imported[ev.id] = true;
+      if (ev.id && ev.src === 'import') K.imported[ev.id] = true;
+      if (ev.v === 'easy' || ev.v === 'unknown') r.markEv = ev.id;
       if (ev.v === 'easy') {
         if (r.mark === 'easy') return;       // already so (the same mark can arrive twice, from two devices)
-        r.mark = 'easy'; r.stage = 'none'; r.diag = null;
+        r.mark = 'easy'; r.stage = 'none'; r.diag = null; r.rung = 5;
         ['m', 's', 'r', 'u'].forEach(p => { r.parts[p] = prior(365, time); });
         r.parts.t = prior(15, time);       // tones are the part people are least aware of not knowing: checked after about a month
       } else if (ev.v === 'unknown') {
         if (r.mark === 'unknown' && r.stage === 'wait') return;
-        r.mark = 'unknown'; r.parts = {}; r.stage = 'wait'; r.knows = false; r.intro = 0; r.diag = null;
+        r.mark = 'unknown'; r.parts = {}; r.stage = 'wait'; r.knows = false; r.intro = 0; r.diag = null; r.rung = 0; r.started = false;
       } else if (ev.v === 'clear') {
         if (r.mark === 'easy') Object.keys(r.parts).forEach(p => { if (r.parts[p].src === 'said') delete r.parts[p]; });
         if (r.mark === 'unknown' && r.stage === 'wait') r.stage = 'none';
@@ -122,39 +124,65 @@
     }
     if (ev.k === 'look') {          // you clicked the word to see what it is: counted as not knowing its meaning
       if (!ev.noted || !byWord[ev.w]) return;
+      if (r.mark === 'easy') r.mark = null;
+      if (r.stage === 'none') { r.started = true; r.rung = Math.min(r.rung || 0, 1); return; }       // not being learned: it joins the words in play, near the bottom of the ladder
       const part = r.parts.m || (r.parts.m = { card: F.createEmptyCard(time), right: 0, wrong: 0, src: null });
       part.card = fsrs.next(part.card, time, F.Rating.Again).card; part.wrong++; part.last = false; part.src = 'tested';
-      if (r.mark === 'easy') r.mark = null;
-      if (r.stage === 'none') { r.stage = 'wait'; r.knows = false; r.diag = null; r.waitT = +time; }
       return;
     }
-    if (ev.k === 'intro' || ev.k === 'start') { r.stage = 'active'; r.act = +time; if (ev.k === 'intro') r.intro = +time; return; }
+    if (ev.k === 'intro' || ev.k === 'start') {
+      r.stage = 'active'; r.act = +time; r.started = true;
+      if (ev.k === 'intro') { r.intro = +time; r.rung = ev.knew === false ? 0 : Math.max(r.rung || 0, 1); }       // "I didn't know this" starts at the bottom
+      return;
+    }
     if (ev.k !== 'ans') return;
     const res = ev.res || {};
     K.nAns++;
+    // slow for you: more than three times your usual time for this kind of question (and not a long pause away from it)
+    const times = K.ms[ev.type] || (K.ms[ev.type] = []);
+    const usual = times.length >= 15 ? times.slice().sort((a, b) => a - b)[times.length >> 1] : 0;
+    const slow = usual > 0 && ev.ms > 3 * usual && ev.ms < 180000;
+    if (ev.verdict === 'right' && ev.ms < 180000) { times.push(ev.ms); if (times.length > 50) times.shift(); }
+    const day = Math.floor(+time / 86400000);
     Object.keys(res).forEach(p => {
       const o = res[p];
       let part = r.parts[p];
       if (o.how === 'implied' && part && (part.src === 'said' || part.right + part.wrong > 0)) return;
       if (!part) part = r.parts[p] = { card: F.createEmptyCard(time), right: 0, wrong: 0, src: null };
       const first = part.right + part.wrong === 0 && part.src !== 'said';
-      // right = Good, wrong = Again. A first right answer, typed, on a word never taught here = Easy (you knew it already);
-      // the meaning implied by typing the word gets the same as the typing did.
-      const rating = !o.ok ? F.Rating.Again : (first && ev.prior && o.how !== 'choice') ? F.Rating.Easy : F.Rating.Good;
-      part.card = fsrs.next(part.card, time, rating).card;
+      // right = Good, wrong = Again. Easy only for typing a word never taught here (you knew it already), and for the meaning
+      // that implies. Hard for a right answer that was slow for you.
+      const rating = !o.ok ? F.Rating.Again : (first && ev.prior && (p === 'r' || o.how === 'implied')) ? F.Rating.Easy
+        : (slow && o.how === 'typed') ? F.Rating.Hard : F.Rating.Good;
+      // What does not change the memory state: a second answer on the same day (unless a right has turned wrong), and
+      // a right pick from four on a part that was not slipping (it may be a guess, and proves little).
+      const sameDay = part.day === day && !(part.last === true && !o.ok);
+      const idlePick = o.ok && o.how === 'choice' && !first && part.card.state !== 0 && fsrs.get_retrievability(part.card, time, false) >= TARGET_R;
+      if (!sameDay && !idlePick) { part.card = fsrs.next(part.card, time, rating).card; part.day = day; }
       if (o.ok) part.right++; else part.wrong++;
       part.last = o.ok;
       part.src = o.how === 'implied' ? 'implied' : 'tested';
     });
+    // The ladder: each word climbs through sentence tasks, one rung per right answer, and drops one on a miss.
+    // Pinyin and tones never move it: the pinyin question is a side check.
+    r.started = true;
+    if (ev.type !== 'read' || !sentsOf(ev.w).length) {
+      let at = RUNG[ev.type] || 1;
+      if (!sentsOf(ev.w).length) at = ev.type === 'read' ? 2 : 5;       // a word with no sentence has a two-step ladder
+      const missed = ev.idk || Object.keys(res).some(p => !['u', 's', 't'].includes(p) && !res[p].ok);
+      if (ev.verdict === 'right') r.rung = Math.max(r.rung || 0, at);
+      else if (missed) r.rung = Math.max(0, Math.min(r.rung || 0, at) - 1);
+    }
+    r.lastAns = +time;
     const bad = p => res[p] && !res[p].ok;
     if (r.mark === 'easy' && (bad('m') || bad('r'))) r.mark = null;
     if (r.mark === 'unknown' && res.m && res.m.ok) r.mark = null;
     if (ev.reason === 'follow') { r.knows = !!(res.m && res.m.ok); r.stage = 'wait'; r.diag = 'done'; r.intro = 0; r.waitT = +time; }
     else if (ev.reason === 'findout' && res.r) r.diag = bad('r') ? 'recallFailed' : 'known';      // older events found out by typing first
-    else if (ev.reason === 'findout') {          // found out by recognition: don't know the meaning -> teach it
-      if (bad('m')) { r.stage = 'wait'; r.knows = false; r.intro = 0; r.diag = 'done'; r.waitT = +time; }
+    else if (ev.reason === 'findout' && (res.m || ev.idk)) {          // first met in a sentence and not known: show its card before asking again
+      if (bad('m') || ev.idk) { r.stage = 'wait'; r.knows = false; r.intro = 0; r.diag = 'done'; r.waitT = +time; }
       else r.diag = 'recognised';
-    } else if (ev.reason === 'probe') {          // recognised; can it also be typed? If not, learn that, skipping the card
+    } else if (ev.reason === 'probe' && res.r) {          // recognised; can it also be typed? If not, learn that, skipping the card
       if (bad('r')) { r.stage = 'wait'; r.knows = true; r.diag = 'done'; r.waitT = +time; }
       else r.diag = 'known';
     }
@@ -283,20 +311,8 @@
     if (r && r.drop) return 'drop';
     if (r && r.mark === 'easy') return 'easy';
     if (r && r.stage === 'wait') return 'wait';
-    if (r && r.stage === 'active') return consolidated(r) ? 'known' : 'learning';
-    if (r && r.diag === 'known') return 'known';
-    if (r && (r.diag === 'recallFailed' || r.diag === 'recognised')) return 'checking';
+    if (r && (r.started || r.stage === 'active')) return (r.rung || 0) >= 5 ? 'known' : 'learning';
     return word && word.lv === D.level ? 'untouched' : 'assumed';
-  }
-  function openPart(w) {   // the next step for a word being learned
-    const r = K.w[w], p = r.parts, has = sentsOf(w).length > 0;
-    if (!(p.m && p.m.right > 0)) return 'm';
-    const quick = st.fast && st.fast[w];        // "faster" was pressed on this word: skip the two easier sentence steps
-    if (has && !quick && !(p.u && p.u.right > 0)) return 'u';
-    if (!(p.r && p.r.right > 0)) return 'r';
-    if (has && !quick && !r.cyc.x) return 'x';          // then once at the level of the whole sentence
-    if (!tested(p.t)) return 't';
-    return null;
   }
 
   // ---------- small helpers ----------
@@ -418,106 +434,97 @@
   // ---------- what comes next ----------
   const SITTING = 30 * 60000;
   function nextItem() {
-    const now = new Date(), recentW = st.recent.slice(0, 2).map(x => x.w), last = recentW[0];
-    const pc = pace();     // -3..3: faster means more new words and a little longer before things return
-    const target = TARGET_R - 0.02 * pc, dueLimit = DUE_THRESHOLD + 4 * pc, youngCap = YOUNG_CAP + 3 * pc, teachEvery = pc > 0 ? 2 : pc < 0 ? 4 : 3;
+    const now = new Date(), recentW = st.recent.slice(0, 3).map(x => x.w), last = recentW[0];
+    const pc = pace();     // -3..3: faster means more words in play at once
+    const target = TARGET_R - 0.02 * pc, dueLimit = DUE_THRESHOLD + 4 * pc, inPlayCap = YOUNG_CAP + 3 * pc;
     const cool = st.cool || {};
     const parked = w => !!cool[w] && cool[w].fails >= 2 && Date.now() - cool[w].t < SITTING;      // missed twice: put aside for this sitting
     const cooling = w => !!cool[w] && st.counter < cool[w].until;                                  // missed once: not again for a while
     const base = w => byWord[w] && !(K.w[w] && (K.w[w].drop || K.w[w].stage === 'wait'));
     const live = w => base(w) && !parked(w) && !cooling(w);
     st.retry = st.retry.filter(x => base(x.w) && !parked(x.w));
-    const item = x => ({ w: x.w, part: x.part, reason: x.reason, type: x.type });
-    // 1. something missed a while ago, or a follow-up check. Never two of these in a row.
+    // 1. something missed a while ago. Never two of these in a row.
     const wasRetry = st.lastRetry; st.lastRetry = false;
     const ready = st.retry.filter(x => st.counter >= x.at);
     const r1 = wasRetry ? null : ready.find(x => x.w !== last);
-    if (r1) { st.lastRetry = true; return item(r1); }
+    if (r1) { st.lastRetry = true; return { w: r1.w }; }
     const pending = new Set(st.retry.map(x => x.w));
-    // 2. a part that is slipping, most likely still remembered first
+    const free = w => live(w) && !pending.has(w);
+    // 2. a known word that is slipping (meaning, recall or use; never pinyin), most likely still remembered first
     const due = [];
     Object.keys(K.w).forEach(w => {
       const r = K.w[w];
-      if (!live(w) || pending.has(w)) return;
-      Object.keys(r.parts).forEach(p => { const v = retr(r.parts[p], now); if (v < target && (tested(r.parts[p]) || r.parts[p].src === 'said')) due.push({ w, part: p, v }); });
+      if (!free(w) || status(w) === 'learning') return;
+      const vs = ['m', 'r', 'u'].filter(p => r.parts[p] && (tested(r.parts[p]) || r.parts[p].src === 'said')).map(p => retr(r.parts[p], now));
+      if (vs.length && Math.min(...vs) < target) due.push({ w, v: Math.min(...vs) });
     });
     due.sort((a, b) => b.v - a.v);
-    const d = due.find(x => x.w !== last) || due[0];
-    if (d) return { w: d.w, part: d.part };
-    // 3. the next step of a word being learned
-    const active = Object.keys(K.w).filter(w => live(w) && K.w[w].stage === 'active' && !pending.has(w) && openPart(w))
-      .sort((a, b) => K.w[a].act - K.w[b].act);
-    const a3 = active.find(w => !recentW.includes(w));
-    if (a3) return { w: a3, part: openPart(a3) };
-    // 4. find out and teach, about two to one
+    const d = due.find(x => !recentW.includes(x.w)) || due[0];
+    if (d) return { w: d.w };
+    // a pinyin check now and then: at most one question in six, and it holds nothing up
+    if ((st.sinceRead || 0) >= 5) {
+      const c = Object.keys(K.w).filter(w => free(w) && !recentW.includes(w) && (K.w[w].rung || 0) >= 2 && sentsOf(w).length &&
+        (!K.w[w].parts.t || retr(K.w[w].parts.t, now) < target))
+        .sort((a, b) => (K.w[a].parts.t ? 1 : 0) - (K.w[b].parts.t ? 1 : 0) || (K.w[a].lastAns || 0) - (K.w[b].lastAns || 0))[0];
+      if (c) return { w: c, type: 'read', check: true };
+    }
+    // 3. words in play: each moves up its ladder, the one waiting longest first
+    const playing = Object.keys(K.w).filter(w => base(w) && status(w) === 'learning');
+    const canPlay = playing.filter(w => free(w) && !recentW.includes(w)).sort((a, b) => (K.w[a].lastAns || 0) - (K.w[b].lastAns || 0));
+    // 4. new words: found out about, or taught from the don't-know list. Only while fewer than the cap are in play.
     const want = w => (K.w[w] ? K.w[w].want : 0);
-    // words to teach: wanted ones first, then those waiting longest (one you just missed goes to the back)
     const waitQ = Object.keys(K.w).filter(w => K.w[w].stage === 'wait' && !K.w[w].drop && byWord[w] && !parked(w) && !cooling(w))
       .sort((a, b) => (want(b) - want(a)) || ((K.w[a].waitT || 0) - (K.w[b].waitT || 0)) || (rankOf(a) - rankOf(b)));
     const findQ = order.filter(x => status(x.w) === 'untouched' && !pending.has(x.w)).map(x => x.w)
       .sort((a, b) => (want(b) - want(a)) || (rankOf(a) - rankOf(b)));
-    const young = Object.keys(K.w).filter(w => K.w[w].stage === 'active' && !K.w[w].drop && !consolidated(K.w[w])).length;
-    // finding out stops while 20 words are already waiting to be taught, so that queue cannot grow without end
-    const canTeach = waitQ.length > 0 && young < youngCap, canFind = findQ.length > 0 && waitQ.length < 20;
-    // words left half-checked (their follow-up was dropped): finish checking them
-    const half = Object.keys(K.w).find(w => live(w) && !pending.has(w) && K.w[w].stage === 'none' && !recentW.includes(w) &&
-      (K.w[w].diag === 'recognised' || K.w[w].diag === 'recallFailed'));
-    const teach = w => (K.w[w].knows ? { start: w } : { intro: w });
-    const toneOpen = Object.keys(K.w).find(w => live(w) && K.w[w].diag === 'known' && !K.w[w].parts.t && !recentW.includes(w) && !pending.has(w));
-    // words whose recall has been shown: material for whole-sentence practice (retype, type back, typed tiles)
-    const pool = Object.keys(K.w).filter(w => live(w) && !recentW.includes(w) && !pending.has(w) && K.w[w].mark !== 'easy' &&
-      K.w[w].parts.r && K.w[w].parts.r.right > 0 && sentsOf(w).length)
-      .map(w => ({ w, v: retr(K.w[w].parts.r, now) })).sort((a, b) => a.v - b.v).slice(0, 3);
-    if (new Set(due.map(x => x.w)).size < dueLimit) {
-      if (half) return K.w[half].diag === 'recognised' ? { w: half, reason: 'probe' } : { w: half, type: 'read', reason: 'follow' };
-      if (canFind && !K.sorted[findQ[0]]) return { sort: findQ.filter(w => !K.sorted[w]).slice(0, SORT_BATCH) };
+    const room = playing.length < inPlayCap && new Set(due.map(x => x.w)).size < dueLimit;
+    const newOne = () => {
+      if (!room) return null;
+      if (findQ.length && waitQ.length < 20 && !K.sorted[findQ[0]]) return { sort: findQ.filter(w => !K.sorted[w]).slice(0, SORT_BATCH) };
       st.turn++;
-      if (canTeach && (!canFind || st.turn % teachEvery === 0)) return teach(waitQ[0]);
-      if (canFind) {
-        if (pool.length && st.turn % 4 === 3) return { w: pool[rand(pool.length)].w, part: 'x' };
-        if (toneOpen && st.turn % 5 === 4) return { w: toneOpen, part: 't' };
-        return { w: findQ[0], reason: 'findout' };
-      }
-    }
-    if (active.length) return { w: active[0], part: openPart(active[0]) };
-    if (ready.length) return item(ready[0]);
-    if (st.retry.length) return item(st.retry.find(y => y.w !== last) || st.retry[0]);
-    // 5. nothing waiting: extra practice
-    if (toneOpen && rand(3) === 0) return { w: toneOpen, part: 't', extra: true };
-    if (pool.length) return { w: pool[rand(pool.length)].w, part: 'x', extra: true };
-    if (toneOpen) return { w: toneOpen, part: 't', extra: true };
-    if (waitQ.length) return teach(waitQ[0]);
-    const easyTone = shuffle(Object.keys(K.w).filter(w => live(w) && K.w[w].mark === 'easy' && byWord[w].lv === D.level && !recentW.includes(w)))[0];
-    if (easyTone) return { w: easyTone, part: 't', extra: true };
+      if (waitQ.length && (st.turn % 3 === 0 || !findQ.length || waitQ.length >= 20)) return { intro: waitQ[0] };
+      if (findQ.length) return { w: findQ[0], reason: 'findout' };
+      return waitQ.length ? { intro: waitQ[0] } : null;
+    };
+    st.mix = (st.mix || 0) + 1;
+    if (canPlay.length && (st.mix % 3 !== 0 || !room)) return { w: canPlay[0] };      // two turns for words in play, one for a new word
+    const fresh = newOne();
+    if (fresh) return fresh;
+    if (canPlay.length) return { w: canPlay[0] };
+    if (ready.length) return { w: ready[0].w };
+    if (st.retry.length) return { w: (st.retry.find(y => y.w !== last) || st.retry[0]).w };
+    // 5. nothing waiting: extra practice on words you know
+    const known = Object.keys(K.w).filter(w => free(w) && !recentW.includes(w) && status(w) === 'known' && sentsOf(w).length)
+      .sort((a, b) => (K.w[a].lastAns || 0) - (K.w[b].lastAns || 0)).slice(0, 4);
+    if (known.length) return { w: known[rand(known.length)], extra: true };
+    const stuck = playing.filter(w => base(w))[0];
+    if (stuck) return { w: stuck };
+    if (waitQ.length) return { intro: waitQ[0] };
     return { done: true };
   }
 
+  // the task for a word is the next rung of its ladder: gap with choices, tiles, typed tiles, typed gap, then whole sentences
   function typeFor(it) {
-    const w = it.w, r = K.w[w] || { parts: {}, cyc: {} }, has = sentsOf(w).length > 0, hit = !!pickSent(w, { needHit: true });
     if (it.type) return it.type;
-    if (it.reason === 'findout') return 'read';
-    if (it.reason === 'probe') return hit ? 'typedGap' : 'meaningToWord';
-    if (it.reason === 'follow') return 'read';
-    const seen = has && !!pickSent(w, { seenOnly: true });
-    const recall = [has && 'tilesType', hit && 'typedGap', seen && 'typeBack', 'meaningToWord'].filter(Boolean);
-    const got = p => r.parts[p] && r.parts[p].right > 0;
-    let cyc;
-    if (it.part === 't') cyc = ['read'];          // tones are only asked as part of the word's pinyin, never alone
-    else if (it.part === 'm') cyc = (got('m') && hit) ? ['read', 'gap'] : ['read'];
-    else if (it.part === 's') cyc = got('r') ? recall : ['read'];
-    else if (it.part === 'u') cyc = has ? (got('r') ? ['tilesType', 'retype', 'tiles'] : ['tiles']) : recall;
-    else if (it.part === 'r') cyc = recall;
-    else cyc = [has && 'retype', seen && 'typeBack', has && 'tilesType', hit && 'typedGap', 'meaningToWord'].filter(Boolean);
-    const n = r.cyc[it.part || 'x'] || 0;
-    let t = cyc[n % cyc.length];
-    if (cyc.length > 1 && st.recent.length > 1 && st.recent[0].type === t && st.recent[1].type === t) t = cyc[(n + 1) % cyc.length];
+    const w = it.w, r = K.w[w] || { parts: {}, cyc: {} }, has = sentsOf(w).length > 0, hit = !!pickSent(w, { needHit: true });
+    const next = Math.min(5, (r.rung || 0) + 1);
+    if (!has) return next <= 2 ? 'read' : 'meaningToWord';          // a word with no sentence: word questions only
+    if (next === 1) return hit ? 'gap' : 'tiles';
+    if (next === 2) return 'tiles';
+    if (next === 3) return 'tilesType';
+    if (next === 4) return hit ? 'typedGap' : 'tilesType';
+    const top = ['retype', pickSent(w, { seenOnly: true }) && 'typeBack', hit && 'typedGap', 'tilesType'].filter(Boolean);
+    const n = r.cyc.x || 0;
+    let t = top[n % top.length];
+    if (top.length > 1 && st.recent.length > 1 && st.recent[0].type === t && st.recent[1].type === t) t = top[(n + 1) % top.length];
     return t;
   }
   function makeTask(it) {
     const type = typeFor(it), w = it.w;
     const needsSent = !['read', 'tones', 'meaningToWord'].includes(type);
     const pick = needsSent ? pickSent(w, { seenOnly: type === 'typeBack', needHit: type === 'gap' || type === 'typedGap' }) : null;
-    return { word: w, type, part: it.part || null, reason: it.reason || null, extra: !!it.extra,
+    const atTop = ['retype', 'typeBack'].includes(type) || ((K.w[w] || {}).rung || 0) >= 4;
+    return { word: w, type, part: atTop ? 'x' : null, reason: it.reason || null, extra: !!it.extra, check: !!it.check,
       sent: pick ? S[pick[0]] : null, sense: pick ? pick[1] : (type === 'meaningToWord' ? nextMeaning(w) : -1), started: Date.now(), done: false };
   }
 
@@ -534,12 +541,18 @@
     const r = K.w[w], was = r ? r.mark : null;
     const during = current && !current.done && current.word === w;
     if (during && v === 'unknown') { idkNow(); log({ k: 'mark', w, v, src: src || 'click' }); return; }   // show the answer, then put it on the list
-    log({ k: 'mark', w, v, src: src || 'click' });
+    const made = log({ k: 'mark', w, v, src: src || 'click' });
     const label = { easy: 'trivially easy', unknown: "don't know", want: 'want to learn', unwant: 'no longer marked want to learn',
       drop: 'will not be shown', undrop: 'will be shown again', clear: 'mark removed' }[v];
     toast(w + ': ' + label + (byWord[w] ? '' : ' (not in the word lists, so it is only noted)'),
-      ['easy', 'unknown'].includes(v) ? () => { log({ k: 'mark', w, v: was === 'easy' || was === 'unknown' ? was : 'clear', src: 'undo' }); } : null);
+      ['easy', 'unknown'].includes(v) ? () => { log({ k: 'undo', ref: made.id }); rebuild(); } : null);
     if (during && (v === 'easy' || v === 'drop')) advance();
+  }
+  function unmark(w) {       // take back the last "trivially easy" / "don't know" on a word; what was known before returns
+    const r = K.w[w];
+    if (!r || !r.markEv) return;
+    log({ k: 'undo', ref: r.markEv }); rebuild();
+    toast(w + ': mark removed');
   }
   function infoOf(w, tok) {
     if (tok && tok.p) return { p: tok.p, g: tok.g };
@@ -562,7 +575,7 @@
       item("Don't know this word", 'unknown'), item('Trivially easy', 'easy'),
       r.want ? item('Remove “want to learn”', 'unwant') : item('Want to learn', 'want'),
       r.drop ? item('Show this word again', 'undrop') : item("Don't show this word", 'drop'),
-      (r.mark ? item('Remove my mark (' + (r.mark === 'easy' ? 'trivially easy' : "don't know") + ')', 'clear') : ''));
+      (r.mark ? el('button', { text: 'Remove my mark (' + (r.mark === 'easy' ? 'trivially easy' : "don't know") + ')', onclick: () => { m.hidden = true; unmark(w); } }) : ''));
     m.hidden = false;
     m.style.left = Math.max(8, Math.min(x, window.innerWidth - m.offsetWidth - 8)) + 'px';
     m.style.top = Math.max(8, Math.min(y, window.innerHeight - m.offsetHeight - 8)) + 'px';
@@ -599,6 +612,7 @@
   function screen(statusText, ...kids) {
     onEnter = onDigit = null;
     $('status').textContent = statusText || '';
+    $('backBtn').hidden = (viewing < 0 ? backTop() : viewing - 1) < 0;
     main.replaceChildren(...kids.flat().filter(Boolean));
     window.scrollTo(0, 0);
   }
@@ -618,6 +632,8 @@
     });
     return line;
   }
+  // set phrases in a sentence (出问题), from the dictionary: shown under it, since the tiles are the separate words
+  const phraseLines = s => (s.ph || []).map(ph => el('div', { class: 'muted small phrase' }, el('b', { class: 'zh', text: ph.w }), '  ' + ph.p + ' — ' + ph.g));
   const pinyinLine = s => el('div', { class: 'pinyin small', text: s.t.map(t => t.k === 'p' ? '' : t.p.replace(/ \/ /g, '/')).filter(Boolean).join('  ') });
   const bigWord = (w, hide) => wordEl('div', w, null, { class: 'big', text: w }, null, hide);
   // one click shows the first pinyin letter of the word; it is noted on the answer
@@ -682,8 +698,7 @@
     const waiting = all.filter(w => status(w) === 'wait').sort((a, b) => (K.w[b].want - K.w[a].want) || ((K.w[a].waitT || 0) - (K.w[b].waitT || 0)) || (rankOf(a) - rankOf(b)));
     const parts = [
       el('div', { class: 'prompt', text: 'The words in play. ✓ if you know a word well, ✗ if you don\'t know it at all; leave the rest.' }),
-      group('Being learned', all.filter(w => status(w) === 'learning').sort((a, b) => K.w[a].act - K.w[b].act)),
-      group('Being checked', all.filter(w => status(w) === 'checking')),
+      group('In play', all.filter(w => status(w) === 'learning').sort((a, b) => (K.w[b].rung || 0) - (K.w[a].rung || 0))),
       group('Waiting to be taught', waiting.slice(0, 60)),
       waiting.length > 60 ? el('div', { class: 'muted small', text: 'and ' + (waiting.length - 60) + ' more waiting' }) : null,
       el('button', { class: 'primary', text: 'Back to practice', onclick: advance })];
@@ -691,41 +706,45 @@
     onEnter = advance;
   }
 
-  function wordCard(w, withMarks) {
+  // ctx: 'missed' offers "I didn't know this at all"; 'right' offers "Trivially easy"; nothing else to press
+  function wordCard(w, ctx) {
     const word = byWord[w], r = K.w[w] || { parts: {} }, now = new Date();
-    const chip = p => {
+    const one = p => {
       const part = r.parts[p], v = retr(part, now);
       const cls = !part ? 'none' : part.src === 'said' ? 'said' : part.last === false ? 'bad' : v >= TARGET_R ? 'good' : 'slip';     // red = wrong last time
       const how = !part ? 'not tested' : part.src === 'said' ? 'you said' : part.src === 'implied' ? 'implied' : part.right + ' right, ' + part.wrong + ' wrong';
       return el('span', { class: 'part ' + cls, title: how, text: PARTS[p] });
     };
-    const mk = (text, v, on) => el('button', { class: on ? 'on' : '', text, onclick: e => {
-      mark(w, on ? (v === 'want' ? 'unwant' : 'clear') : v); e.target.classList.toggle('on');
-    } });
-    return el('div', { class: 'wordcard' },
+    const offer = (text, v, cls) => {
+      const b = el('button', { class: cls, text, onclick: () => { mark(w, v); b.disabled = true; b.textContent = 'Noted'; } });
+      return el('div', { class: 'under one' }, b);
+    };
+    return [el('div', { class: 'wordcard' },
       wordEl('span', w, null, { class: 'h', text: w }), el('span', { class: 'pinyin', text: readings(w) }),
       defView(word, 'def'),
-      el('div', { class: 'parts' }, Object.keys(PARTS).map(chip)),
-      withMarks ? el('div', { class: 'flags' }, mk("don't know", 'unknown', r.mark === 'unknown'), mk('trivially easy', 'easy', r.mark === 'easy'),
-        mk('want to learn', 'want', !!r.want)) : null);
+      el('div', { class: 'parts' }, Object.keys(PARTS).map(one))),
+      ctx === 'missed' && r.mark !== 'unknown' ? offer("✗ I didn't know this at all", 'unknown', 'dont') : null,
+      ctx === 'right' && r.mark !== 'easy' ? offer('✓ Trivially easy', 'easy', 'know') : null];
   }
 
   function showIntro(w) {
     current = null;
     const word = byWord[w], sents = sentsOf(w).slice(0, 2).map(x => S[x[0]]);
-    const go = () => {
-      log({ k: 'intro', w }); st.counter++;
-      st.retry.push({ w, part: 'm', at: st.counter + 2 });
+    const go = knew => {
+      log({ k: 'intro', w, knew: knew === false ? false : null }); st.counter++;
+      st.retry.push({ w, at: st.counter + 2 });
       st.recent.unshift({ w, type: 'intro' }); st.recent.length = Math.min(st.recent.length, 5);
       save(); advance();
     };
     screen('new word',
       el('div', { class: 'prompt', text: 'A new word. Read it; you will be asked about it in a moment.' }),
       bigWord(w), el('div', { class: 'center pinyin', text: readings(w) }), defView(word, 'center def'),
-      sents.map(s => el('div', null, sentView(s, { highlight: w }), el('div', { class: 'muted', text: s.en }))),
-      el('button', { class: 'primary', text: 'Next', onclick: go }),
-      el('button', { class: 'plain wide', text: 'Trivially easy: I know this', onclick: () => { mark(w, 'easy'); advance(); } }));
-    onEnter = go;
+      sents.map(s => el('div', null, sentView(s, { highlight: w }), el('div', { class: 'muted', text: s.en }), phraseLines(s))),
+      el('button', { class: 'primary', text: 'Next', onclick: () => go() }),
+      el('div', { class: 'under two' },
+        el('button', { class: 'know', text: '✓ Trivially easy', onclick: () => { mark(w, 'easy'); advance(); } }),
+        el('button', { class: 'dont', text: "✗ I didn't know this", onclick: () => go(false) })));
+    onEnter = () => go();
   }
 
   function showTask(task) {
@@ -778,6 +797,10 @@
       const go = () => {
         const v = normZh(inp.value); if (!v) return;
         const ok = v === task.word;
+        if (!ok && byWord[v] && overlaps(byWord[v], byWord[task.word])) {       // another real word with a shared meaning: the app cannot call it wrong
+          return finish(task, { verdict: 'unchecked', res: {}, answer: v,
+            lines: [{ label: v, ok: null, note: 'has a meaning in common with this one, so it is not counted as wrong. The word wanted here was ' + task.word }] });
+        }
         finish(task, { verdict: ok ? 'right' : 'wrong', res: ok ? { r: T(true), s: T(true) } : { r: T(false) }, answer: v });
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, answer: '' });
@@ -791,6 +814,10 @@
       const go = () => {
         const v = normZh(inp.value); if (!v) return;
         const ok = v === w.w;
+        if (!ok && byWord[v] && overlaps(byWord[v], byWord[w.w])) {       // another real word with a shared meaning: the app cannot call it wrong
+          return finish(task, { verdict: 'unchecked', res: {}, answer: v,
+            lines: [{ label: v, ok: null, note: 'has a meaning in common with this one, so it is not counted as wrong. The word wanted here was ' + w.w }] });
+        }
         finish(task, { verdict: ok ? 'right' : 'wrong', res: ok ? { r: T(true), s: T(true) } : { r: T(false) }, answer: v });
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, answer: '' });
@@ -878,16 +905,17 @@
       const ans = row.map(t => t.blank ? typedWord : t.w).join('');
       const ok = ans === normZh(s.zh);
       const orderOk = row.map(t => t.blank ? task.word : t.w).join('') === normZh(s.zh);
-      const res = { u: T(orderOk) };
+      const res = orderOk ? { u: T(true) } : {};       // a different order may still be good Chinese: only a right one is evidence
       if (typed) { res.r = T(typedWord === task.word); if (typedWord === task.word) res.s = T(true); }
-      finish(task, { verdict: ok ? 'right' : 'wrong', res, sres: ok ? (typed ? 'good' : 'hard') : 'again', answer: ans, diff: !ok, tiles: true,
+      const wordWrong = typed && typedWord !== task.word;
+      finish(task, { verdict: ok ? 'right' : wordWrong ? 'wrong' : 'unchecked', res, sres: ok ? (typed ? 'good' : 'hard') : 'again', answer: ans, diff: !ok, tiles: true,
         shown: bank.concat(row).map(t => t.blank ? '?' : t.w), picked: row.map(t => t.blank ? typedWord : t.w), typed: typed ? typedWord : undefined,
         lines: typed ? [
           { label: 'Missing word', ok: typedWord === task.word, note: typedWord === task.word ? typedWord : 'you typed “' + typedWord + '”, it is ' + task.word },
-          { label: 'Order', ok: orderOk, note: orderOk ? '' : 'not the order of the source sentence' }] : null,
-        why: ok || typed ? '' : 'Not the order of the source sentence.' });
+          { label: 'Order', ok: orderOk ? true : null, note: orderOk ? '' : (row.length < tiles.length ? 'not all the words were used' : 'not the order of the source sentence') + '; yours may still be right' }] : null,
+        why: ok || typed ? '' : (row.length < tiles.length ? 'Not all the words were used.' : 'Not the order of the source sentence.') + ' The app cannot tell whether yours is also right, so nothing is counted against you.' });
     };
-    idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: typed ? { r: T(false), u: T(false) } : { u: T(false) }, sres: 'again', answer: '', tiles: true });
+    idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: typed ? { r: T(false) } : {}, sres: 'again', answer: '', tiles: true });
     check.addEventListener('click', go);
     const tog = el('input', { type: 'checkbox' }); tog.checked = st.glosses;
     tog.addEventListener('change', () => { st.glosses = tog.checked; document.body.classList.toggle('noglosses', !st.glosses); save(); });
@@ -912,31 +940,29 @@
     st.counter++;
     st.retry = st.retry.filter(x => x.w !== w);
     const stageBefore = before.stage;
+    const pred = {};          // the chance the app gave each part just before this answer
+    Object.keys(res).forEach(p => { pred[p] = before.parts[p] ? +retr(before.parts[p], new Date()).toFixed(3) : null; });
     log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, sense: task.sense,
       verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, shown: out.shown, picked: out.picked, typed: out.typed,
       ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint,
-      prior: !before.intro && stageBefore === 'none' && !task.hint });      // "knew it already" only counts without the hint
-    const failed = Object.keys(res).find(p => !res[p].ok);
-    // a missed word is left alone for a while; missed twice in a sitting, it is put aside until later
+      prior: !before.intro && stageBefore === 'none' && !task.hint,       // "knew it already" only counts without the hint
+      pred });
+    // A miss of the word itself (not pinyin, not tile order): it is left alone for a while, and comes back once.
+    // Missed twice in a sitting, it is put aside until later. A pinyin check changes none of this.
+    st.sinceRead = task.type === 'read' ? 0 : (st.sinceRead || 0) + 1;
     st.cool = st.cool || {};
     Object.keys(st.cool).forEach(x => { if (Date.now() - st.cool[x].t > SITTING) delete st.cool[x]; });
-    if (out.verdict === 'wrong') {
+    const missedWord = !task.check && (out.idk || Object.keys(res).some(p => !['u', 's', 't'].includes(p) && !res[p].ok));
+    if (missedWord) {
       const c = st.cool[w] || { fails: 0 };
       c.fails++; c.t = Date.now(); c.until = st.counter + 8; st.cool[w] = c;
     } else if (out.verdict === 'right') delete st.cool[w];
-    const onceMore = !(st.cool[w] && st.cool[w].fails >= 2);
-    if (K.w[w].stage !== 'wait' && task.reason !== 'follow' && onceMore) {
-      if (task.reason === 'findout') { if (res.m && res.m.ok) st.retry.push({ w, reason: 'probe', at: st.counter + 8 }); }     // recognised: later, can it be typed?
-      else if (task.reason === 'probe') { /* settled either way */ }
-      // could not produce a word that is not being taught: check later whether it is at least recognised
-      else if (res.r && !res.r.ok && stageBefore === 'none') st.retry.push({ w, type: 'read', reason: 'follow', at: st.counter + 8 });
-      else if (failed || out.verdict === 'wrong') st.retry.push({ w, part: failed || task.part || 'u', at: st.counter + 8 + rand(4) });
-    }
-    if (task.slow && !st.retry.some(x => x.w === w) && K.w[w].stage !== 'wait')        // "slower": this word comes round again soon
-      st.retry.push({ w, part: task.part || Object.keys(res)[0] || 'm', at: st.counter + 4 });
-    if (task.fast && out.verdict === 'right') (st.fast = st.fast || {})[w] = true;
+    if (missedWord && st.cool[w].fails < 2 && K.w[w].stage !== 'wait') st.retry.push({ w, at: st.counter + 8 + rand(4) });
+    if (task.slow && !st.retry.some(x => x.w === w) && K.w[w].stage !== 'wait') st.retry.push({ w, at: st.counter + 4 });      // "slower": this word comes round again soon
     st.recent.unshift({ w, type: task.type }); st.recent.length = Math.min(st.recent.length, 5);
     save();
+    hist.push({ task, out }); if (hist.length > 30) hist.shift();
+    viewing = -1;
     showResult(task, out);
   }
 
@@ -954,12 +980,19 @@
       const [ya, yb] = diff(out.answer, normZh(s.zh));
       parts.push(el('div', { class: 'muted small', text: 'You typed' }), ya, el('div', { class: 'muted small', text: 'The sentence' }), yb);
     }
-    if (s) parts.push(sentView(s, { highlight: w }), pinyinLine(s), el('div', { class: 'en', text: s.en }));
-    parts.push(wordCard(w, true));
+    if (s) parts.push(sentView(s, { highlight: w }), pinyinLine(s), el('div', { class: 'en', text: s.en }), ...phraseLines(s));
+    else {       // a question about the word alone still shows it in use
+      const want = task.sense >= 0 ? sentsOf(w).filter(x => x[1] === task.sense) : [];
+      want.concat(sentsOf(w).filter(x => !want.includes(x))).slice(0, 2).forEach(x => {
+        parts.push(sentView(S[x[0]], { highlight: w }), pinyinLine(S[x[0]]), el('div', { class: 'en', text: S[x[0]].en }), ...phraseLines(S[x[0]]));
+      });
+    }
+    const missed = out.idk || Object.keys(out.res || {}).some(p => p !== 'u' && !out.res[p].ok);
+    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : null).filter(Boolean));
     if (s) parts.push(el('div', { class: 'src', text: 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
-    parts.push(el('div', { class: 'src', text: 'Any word: click for pinyin and meaning · shift-click: don\'t know · ctrl-click: trivially easy · right-click or long-press: more.' }));
+    // feedback is one quiet link; it opens the flags and the note
     const flagRow = el('div', { class: 'flags' });
-    const names = (s ? ['bad sentence'] : []).concat(['dull', 'liked this'], out.tiles && out.verdict === 'wrong' && !out.idk ? ['my order may also be right'] : []);
+    const names = (s ? ['bad sentence'] : []).concat(['dull', 'liked this'], out.tiles && out.verdict === 'unchecked' ? ['my order may also be right'] : []);
     names.forEach(f => {
       const b = el('button', { text: f, onclick: () => {
         const on = b.classList.toggle('on');
@@ -969,10 +1002,33 @@
     });
     const note = el('input', { type: 'text', placeholder: 'note (optional)' });
     note.addEventListener('change', () => { if (note.value.trim()) log({ k: 'note', w, note: note.value.trim(), sid: s ? s.id : null, type: task.type }); });
-    parts.push(flagRow, el('div', { class: 'note' }, note), el('button', { class: 'primary', text: 'Next', onclick: advance }));
-    screen('', parts);
-    onEnter = advance;
+    const more = el('div', { class: 'feedback', hidden: '' }, flagRow, el('div', { class: 'note' }, note));
+    const link = el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } });
+    parts.push(el('button', { class: 'primary', text: 'Next', onclick: goForward }), link, more);
+    screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '', parts);
+    onEnter = goForward;
   }
+
+  // ---------- back: look again at earlier results of this sitting, then return to where you were ----------
+  const hist = [];
+  let viewing = -1;        // which earlier result is on screen; -1 = the live screen
+  let resume = null;       // the unanswered question to come back to
+  const backTop = () => hist.length - 1 - (current && current.done ? 1 : 0);      // on a live result, "back" means the one before it
+  function goBack() {
+    const i = viewing < 0 ? backTop() : viewing - 1;
+    if (i < 0) return;
+    if (viewing < 0) resume = current && !current.done ? current : null;
+    viewing = i;
+    showResult(hist[i].task, hist[i].out);
+  }
+  function goForward() {
+    if (viewing >= 0 && viewing < hist.length - 1) { viewing++; return showResult(hist[viewing].task, hist[viewing].out); }
+    const t = viewing >= 0 ? resume : null;
+    viewing = -1; resume = null;
+    if (t) return showTask(t);
+    advance();
+  }
+  $('backBtn').addEventListener('click', goBack);
 
   function advance() {
     $('wordmenu').hidden = true;
@@ -1001,15 +1057,15 @@
   }
   function openMenu() {
     const c = {}; targets.forEach(x => { const s = status(x.w); c[s] = (c[s] || 0) + 1; });
-    const below = words.filter(x => x.lv < D.level && K.w[x.w] && ['wait', 'learning', 'checking'].includes(status(x.w))).length;
+    const below = words.filter(x => x.lv < D.level && K.w[x.w] && ['wait', 'learning'].includes(status(x.w))).length;
     const n = k => c[k] || 0;
     const unsorted = order.filter(x => status(x.w) === 'untouched' && !K.sorted[x.w]).map(x => x.w);
     const panel = el('div', { class: 'panel' },
       el('button', { class: 'plain', text: 'Close', onclick: () => { $('menu').hidden = true; } }),
       el('h3', { text: 'What the app thinks, level ' + D.level + ' (' + targets.length + ' words)' }),
       el('div', { class: 'small counts' },
-        [['marked trivially easy', n('easy')], ['known (tested)', n('known')], ['being learned', n('learning')], ['waiting to be taught', n('wait')],
-          ['being checked', n('checking')], ['not looked at yet', n('untouched')], ['not shown', n('drop')]].map(x => el('div', { text: x[1] + '  ' + x[0] })),
+        [['marked trivially easy', n('easy')], ['known (tested)', n('known')], ['in play', n('learning')], ['waiting to be taught', n('wait')],
+          ['not looked at yet', n('untouched')], ['not shown', n('drop')]].map(x => el('div', { text: x[1] + '  ' + x[0] })),
         below ? el('div', { text: below + '  lower-level words you marked or missed' }) : null,
         el('div', { class: 'muted', text: events.filter(e => e.k === 'ans').length + ' answers recorded' })),
       canSync() ? el('div', { class: 'small muted syncline', text: st.sync.err ? 'Sync is not working: ' + st.sync.err + '. It will try again by itself.'
@@ -1019,7 +1075,7 @@
       el('h3', { text: 'Devices' }),
       el('div', { class: 'small devices' }, [...new Set(events.map(e => e.dev || e.id.split('-')[0]))].map(d => el('div', {
         text: deviceLabel(d) + (d === st.dev ? ', this one' : '') + ': ' + events.filter(e => e.k === 'ans' && (e.dev || e.id.split('-')[0]) === d).length + ' answers' }))),
-      el('button', { class: 'plain', text: 'Words in play: ' + (n('learning') + n('checking') + n('wait') + below) + ' to look through',
+      el('button', { class: 'plain', text: 'Words in play: ' + (n('learning') + n('wait') + below) + ' to look through',
         onclick: () => { $('menu').hidden = true; showWords(); } }),
       unsorted.length ? el('button', { class: 'plain', text: 'Sort another ' + Math.min(SORT_BATCH, unsorted.length) + ' words now',
         onclick: () => { $('menu').hidden = true; showSort(unsorted.slice(0, SORT_BATCH)); } }) : null,

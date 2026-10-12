@@ -142,3 +142,21 @@ main h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0
 .wrow button.know { color: var(--ok); }
 .wrow button.dont { color: var(--bad); }
 .wrow.marked { opacity: .5; }
+#backBtn { border: 0; background: none; font: inherit; font-size: 14px; color: var(--muted); cursor: pointer; padding: 4px 8px 4px 0; }
+#backBtn[hidden] { display: block; visibility: hidden; }
+header #status { flex: 1; text-align: center; }
+/* parts of a word: coloured words, not things to press */
+.parts { gap: 0 12px; margin-top: 6px; }
+.part, .part.good, .part.said, .part.slip, .part.bad { border: 0; background: none; padding: 0; font-size: 12px; border-radius: 0; }
+.part.none { color: var(--line); }
+.part.said { text-decoration: underline dotted; }
+/* one- and two-cell bars use the same look as the bar under a question */
+.under.one { grid-template-columns: 1fr; margin-top: 10px; }
+.under.two { grid-template-columns: 1fr 1fr; margin-top: 10px; }
+.under button.know { color: var(--ok); }
+.under button.dont { color: var(--bad); }
+.under button:disabled { color: var(--muted); cursor: default; background: none; }
+button.hint.fb { margin: 10px auto 0; }
+.feedback .flags { margin-top: 6px; }
+.phrase { margin: -8px 0 12px; }
+.phrase b { color: var(--fg); font-weight: 500; font-size: 16px; }
