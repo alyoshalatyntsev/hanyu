@@ -268,9 +268,10 @@
   function openPart(w) {   // the next step for a word being learned
     const r = K.w[w], p = r.parts, has = sentsOf(w).length > 0;
     if (!(p.m && p.m.right > 0)) return 'm';
-    if (has && !(p.u && p.u.right > 0)) return 'u';
+    const quick = st.fast && st.fast[w];        // "faster" was pressed on this word: skip the two easier sentence steps
+    if (has && !quick && !(p.u && p.u.right > 0)) return 'u';
     if (!(p.r && p.r.right > 0)) return 'r';
-    if (has && !r.cyc.x) return 'x';          // then once at the level of the whole sentence
+    if (has && !quick && !r.cyc.x) return 'x';          // then once at the level of the whole sentence
     if (!tested(p.t)) return 't';
     return null;
   }
@@ -333,9 +334,29 @@
     return [ya, yb];
   }
 
+  // ---------- pace: "slower" and "faster" nudge how much is new and how soon things come back. The nudge wears off. ----------
+  const PACE_FADE = 50;       // answers after which one step of a nudge has worn off
+  function pace() {
+    const steps = Math.floor((st.counter - (st.paceAt || 0)) / PACE_FADE);
+    if (steps > 0) {
+      if (st.pace) st.pace -= Math.sign(st.pace) * Math.min(Math.abs(st.pace), steps);
+      st.paceAt = st.counter;
+    }
+    return st.pace || 0;
+  }
+  function nudge(d) {
+    pace();
+    st.pace = Math.max(-3, Math.min(3, (st.pace || 0) + d)); st.paceAt = st.counter;
+    log({ k: 'pace', d, now: st.pace });
+    if (current && !current.done) { if (d > 0) current.fast = true; else current.slow = true; }
+    toast(st.pace === 0 ? 'Back to the normal pace' : (st.pace > 0 ? 'Going faster' : 'Going slower') + ' for a while');
+  }
+
   // ---------- what comes next ----------
   function nextItem() {
     const now = new Date(), recentW = st.recent.slice(0, 2).map(x => x.w), last = recentW[0];
+    const pc = pace();     // -3..3: faster means more new words and a little longer before things return
+    const target = TARGET_R - 0.02 * pc, dueLimit = DUE_THRESHOLD + 4 * pc, youngCap = YOUNG_CAP + 3 * pc, teachEvery = pc > 0 ? 2 : pc < 0 ? 4 : 3;
     const live = w => byWord[w] && !(K.w[w] && (K.w[w].drop || K.w[w].stage === 'wait'));
     st.retry = st.retry.filter(x => live(x.w));
     const item = x => ({ w: x.w, part: x.part, reason: x.reason, type: x.type });
@@ -349,7 +370,7 @@
     Object.keys(K.w).forEach(w => {
       const r = K.w[w];
       if (!live(w) || pending.has(w)) return;
-      Object.keys(r.parts).forEach(p => { const v = retr(r.parts[p], now); if (v < TARGET_R && (tested(r.parts[p]) || r.parts[p].src === 'said')) due.push({ w, part: p, v }); });
+      Object.keys(r.parts).forEach(p => { const v = retr(r.parts[p], now); if (v < target && (tested(r.parts[p]) || r.parts[p].src === 'said')) due.push({ w, part: p, v }); });
     });
     due.sort((a, b) => b.v - a.v);
     const d = due.find(x => x.w !== last) || due[0];
@@ -366,17 +387,17 @@
     const findQ = order.filter(x => status(x.w) === 'untouched' && !pending.has(x.w)).map(x => x.w)
       .sort((a, b) => (want(b) - want(a)) || (rankOf(a) - rankOf(b)));
     const young = Object.keys(K.w).filter(w => K.w[w].stage === 'active' && !K.w[w].drop && !consolidated(K.w[w])).length;
-    const canTeach = waitQ.length > 0 && young < YOUNG_CAP, canFind = findQ.length > 0;
+    const canTeach = waitQ.length > 0 && young < youngCap, canFind = findQ.length > 0;
     const teach = w => (K.w[w].knows ? { start: w } : { intro: w });
     const toneOpen = Object.keys(K.w).find(w => live(w) && K.w[w].diag === 'known' && !K.w[w].parts.t && !recentW.includes(w) && !pending.has(w));
     // words whose recall has been shown: material for whole-sentence practice (retype, type back, typed tiles)
     const pool = Object.keys(K.w).filter(w => live(w) && !recentW.includes(w) && !pending.has(w) && K.w[w].mark !== 'easy' &&
       K.w[w].parts.r && K.w[w].parts.r.right > 0 && sentsOf(w).length)
       .map(w => ({ w, v: retr(K.w[w].parts.r, now) })).sort((a, b) => a.v - b.v).slice(0, 3);
-    if (due.length < DUE_THRESHOLD) {
+    if (due.length < dueLimit) {
       if (canFind && !K.sorted[findQ[0]]) return { sort: findQ.filter(w => !K.sorted[w]).slice(0, SORT_BATCH) };
       st.turn++;
-      if (canTeach && (!canFind || st.turn % 3 === 0)) return teach(waitQ[0]);
+      if (canTeach && (!canFind || st.turn % teachEvery === 0)) return teach(waitQ[0]);
       if (canFind) {
         if (pool.length && st.turn % 4 === 3) return { w: pool[rand(pool.length)].w, part: 'x' };
         if (toneOpen && st.turn % 5 === 4) return { w: toneOpen, part: 't' };
@@ -527,7 +548,11 @@
     } });
     return b;
   }
-  const idkButton = () => el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, '✗', el('span', { text: " I don't know" }));
+  // under every question: slower · I don't know · faster
+  const idkButton = () => el('div', { class: 'under' },
+    el('button', { class: 'pace slower', title: 'More repetition and fewer new words for a while', text: '« slower', onclick: () => nudge(-1) }),
+    el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, el('span', { class: 'x', text: '✗' }), el('span', { class: 'lbl', text: "I don't know" })),
+    el('button', { class: 'pace faster', title: 'More new words and fewer easy steps for a while', text: 'faster »', onclick: () => nudge(1) }));
 
   let sortTouched = false;
   function showSort(batch) {
@@ -792,6 +817,9 @@
       if (res.r && !res.r.ok && stageBefore === 'none') st.retry.push({ w, type: 'read', reason: 'follow', at: st.counter + 8 });
       else if (failed || out.verdict === 'wrong') st.retry.push({ w, part: failed || task.part || 'u', at: st.counter + 3 + rand(3) });
     }
+    if (task.slow && !st.retry.some(x => x.w === w) && K.w[w].stage !== 'wait')        // "slower": this word comes round again soon
+      st.retry.push({ w, part: task.part || Object.keys(res)[0] || 'm', at: st.counter + 4 });
+    if (task.fast && out.verdict === 'right') (st.fast = st.fast || {})[w] = true;
     st.recent.unshift({ w, type: task.type }); st.recent.length = Math.min(st.recent.length, 5);
     save();
     showResult(task, out);
@@ -912,6 +940,7 @@
   }
   window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
+    pace,
     current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };

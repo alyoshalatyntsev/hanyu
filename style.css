@@ -78,8 +78,13 @@ body.noglosses .tile .g { display: none; }
 .zh { font-family: var(--zh); }
 .big { cursor: default; }
 button.wide { display: block; width: 100%; margin-top: 8px; padding: 10px; text-align: center; color: var(--muted); }
-button.idk { display: block; margin: 18px auto 0; border: 1px solid var(--badbg); background: none; color: var(--bad); font: inherit; font-size: 14px;
-  padding: 7px 16px; border-radius: 999px; cursor: pointer; }
+.under { display: flex; justify-content: space-between; align-items: center; margin-top: 22px; gap: 8px; }
+button.idk { border: 2px solid var(--badbg); background: none; color: var(--bad); font: inherit; cursor: pointer; border-radius: 16px;
+  padding: 6px 22px 8px; display: flex; flex-direction: column; align-items: center; line-height: 1.1; }
+button.idk .x { font-size: 40px; font-weight: 600; }
+button.idk .lbl { font-size: 12px; }
+button.pace { border: 1px solid var(--line); background: none; color: var(--muted); font: inherit; font-size: 14px; padding: 10px 14px; border-radius: 999px; cursor: pointer; }
+button.pace:hover { border-color: var(--fg); color: var(--fg); }
 button.idk:hover { background: var(--badbg); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
