@@ -120,7 +120,7 @@ button.hint { display: block; margin: 6px 0 0 auto; border: 0; background: none;
   cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 button.hint:hover { color: var(--fg); }
 .hintline { margin-top: 6px; text-align: right; }
-.verdict.partial { background: #fbf1d5; color: #7a5a0e; }
+.verdict.partial { background: var(--badbg); color: var(--bad); }      /* partly right is still a red box; the lines say which part */
 .vline { font-weight: 400; font-size: 14px; margin-top: 4px; }
 .vline.ok { color: var(--ok); }
 .vline.bad { color: var(--bad); }

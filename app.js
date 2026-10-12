@@ -439,13 +439,13 @@
     const recall = [has && 'tilesType', hit && 'typedGap', seen && 'typeBack', 'meaningToWord'].filter(Boolean);
     const got = p => r.parts[p] && r.parts[p].right > 0;
     let cyc;
-    if (it.part === 't') cyc = ['read', 'tones'];          // tones are asked with the meaning, or alone, in turn
+    if (it.part === 't') cyc = ['read'];          // tones are only asked as part of the word's pinyin, never alone
     else if (it.part === 'm') cyc = (got('m') && hit) ? ['read', 'gap'] : ['read'];
     else if (it.part === 's') cyc = got('r') ? recall : ['read'];
     else if (it.part === 'u') cyc = has ? (got('r') ? ['tilesType', 'retype', 'tiles'] : ['tiles']) : recall;
     else if (it.part === 'r') cyc = recall;
     else cyc = [has && 'retype', seen && 'typeBack', has && 'tilesType', hit && 'typedGap', 'meaningToWord'].filter(Boolean);
-    const n = (r.cyc[it.part || 'x'] || 0) + (it.part === 't' ? byWord[w].i % 2 : 0);     // half the words start with the tones-only question
+    const n = r.cyc[it.part || 'x'] || 0;
     let t = cyc[n % cyc.length];
     if (cyc.length > 1 && st.recent.length > 1 && st.recent[0].type === t && st.recent[1].type === t) t = cyc[(n + 1) % cyc.length];
     return t;
@@ -665,20 +665,6 @@
       put(el('div', { class: 'prompt', text: 'How is it said, and what does it mean?' }), bigWord(w.w, true), inp,
         el('div', { class: 'choices' }, opts.map((o, i) => el('button', { class: 'choice', text: o.short, onclick: () => answer(i) }))));
       inp.focus();
-    },
-
-    tones(task, put) {
-      const w = byWord[task.word], inp = textInput('tone numbers, e.g. 34 (5 for neutral)', true);
-      const bare = w.n[0].replace(/[0-5]/g, ' ').trim();
-      const go = () => {
-        const v = toneDigits(inp.value); if (!v) return;
-        const ok = w.n.some(n => toneDigits(n) === v);
-        finish(task, { verdict: ok ? 'right' : 'wrong', res: { t: T(ok) }, answer: v, why: ok ? '' : 'You typed ' + v + '. It is ' + w.n.join(' or ') + '.' });
-      };
-      idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { t: T(false) }, answer: '' });
-      put(el('div', { class: 'prompt', text: 'Which tones? One number for each syllable.' }), bigWord(w.w, true),
-        el('div', { class: 'center pinyin', text: bare }), inp, el('button', { class: 'primary', text: 'Check', onclick: go }));
-      onEnter = go; inp.focus();
     },
 
     gap(task, put) {
