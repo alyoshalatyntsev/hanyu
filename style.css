@@ -130,3 +130,5 @@ button.hint:hover { color: var(--fg); }
 #toast i { font-style: normal; opacity: .75; }
 .devices div { margin: 1px 0; }
 button.primary { margin-top: 12px; }
+/* names of people and places: not vocabulary, so they get their own colour */
+.sent .tok.name, .tile.name .h { color: #9a6a1f; }

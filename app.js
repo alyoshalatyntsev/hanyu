@@ -551,7 +551,7 @@
     s.t.forEach(t => {
       if (t.k === 'p') { line.append(t.w); return; }
       if (opt.gap && t.w === opt.gap && !gapDone) { gapDone = true; line.append(el('span', { class: 'gap', text: '　' })); return; }
-      line.append(wordEl('span', t.w, t, { class: 'tok' + (t.w === opt.highlight ? ' target' : ''), text: t.w }));
+      line.append(wordEl('span', t.w, t, { class: 'tok' + (t.w === opt.highlight ? ' target' : '') + (t.k === 'n' ? ' name' : ''), text: t.w }));
     });
     return line;
   }
@@ -782,7 +782,7 @@
     const check = el('button', { class: 'primary', text: 'Check' });
     const move = (t, from) => { if (from === 'bank') { bank = bank.filter(x => x !== t); row.push(t); } else { row = row.filter(x => x !== t); bank.push(t); } draw(); };
     const tileEl = (t, from) => {
-      const n = t.blank ? el('div', { class: 'tile blank', onclick: () => move(t, from) }) : wordEl('div', t.w, t.tok, { class: 'tile' }, () => move(t, from));
+      const n = t.blank ? el('div', { class: 'tile blank', onclick: () => move(t, from) }) : wordEl('div', t.w, t.tok, { class: 'tile' + (t.tok.k === 'n' ? ' name' : '') }, () => move(t, from));
       n.append(el('span', { class: 'h', text: t.blank ? (normZh(inp.value) || '✎') : t.w }), el('span', { class: 'g', text: t.blank ? '' : t.tok.g }));
       return n;
     };
