@@ -88,7 +88,7 @@
       due: new Date(+time + days * 43200000) });
     return { card: c, right: 0, wrong: 0, src: 'said' };
   }
-  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {} });
+  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {}, nAns: 0 });
   function apply(ev) {
     const time = new Date(ev.t);
     if (ev.k === 'reset') { K = blank(); return; }       // start again from nothing; what came before stays in the record
@@ -122,12 +122,13 @@
       const part = r.parts.m || (r.parts.m = { card: F.createEmptyCard(time), right: 0, wrong: 0, src: null });
       part.card = fsrs.next(part.card, time, F.Rating.Again).card; part.wrong++; part.last = false; part.src = 'tested';
       if (r.mark === 'easy') r.mark = null;
-      if (r.stage === 'none') { r.stage = 'wait'; r.knows = false; r.diag = null; }
+      if (r.stage === 'none') { r.stage = 'wait'; r.knows = false; r.diag = null; r.waitT = +time; }
       return;
     }
     if (ev.k === 'intro' || ev.k === 'start') { r.stage = 'active'; r.act = +time; if (ev.k === 'intro') r.intro = +time; return; }
     if (ev.k !== 'ans') return;
     const res = ev.res || {};
+    K.nAns++;
     Object.keys(res).forEach(p => {
       const o = res[p];
       let part = r.parts[p];
@@ -144,13 +145,13 @@
     const bad = p => res[p] && !res[p].ok;
     if (r.mark === 'easy' && (bad('m') || bad('r'))) r.mark = null;
     if (r.mark === 'unknown' && res.m && res.m.ok) r.mark = null;
-    if (ev.reason === 'follow') { r.knows = !!(res.m && res.m.ok); r.stage = 'wait'; r.diag = 'done'; r.intro = 0; }
+    if (ev.reason === 'follow') { r.knows = !!(res.m && res.m.ok); r.stage = 'wait'; r.diag = 'done'; r.intro = 0; r.waitT = +time; }
     else if (ev.reason === 'findout') r.diag = bad('r') ? 'recallFailed' : 'known';
     else if (r.stage === 'none' && bad('r')) r.diag = 'recallFailed';
-    else if (ev.idk && bad('m')) { r.stage = 'wait'; r.knows = false; r.intro = 0; }   // "I don't know" what it means: teach it again
+    else if (ev.idk && bad('m')) { r.stage = 'wait'; r.knows = false; r.intro = 0; r.waitT = +time; }   // "I don't know" what it means: teach it again
     if (ev.sid) {
       const sr = K.sent[ev.sid] || (K.sent[ev.sid] = { card: F.createEmptyCard(time), right: 0, wrong: 0, seen: 0 });
-      sr.seen++;
+      sr.seen++; sr.at = K.nAns;
       if (ev.sres) {
         sr.card = fsrs.next(sr.card, time, { good: F.Rating.Good, hard: F.Rating.Hard, again: F.Rating.Again }[ev.sres]).card;
         if (ev.sres === 'again') sr.wrong++; else sr.right++;
@@ -314,7 +315,7 @@
   function pickSent(w, opt) {
     opt = opt || {};
     let c = sentsOf(w);
-    if (opt.seenOnly) c = c.filter(x => K.sent[x[0]] && K.sent[x[0]].seen);
+    if (opt.seenOnly) c = c.filter(x => K.sent[x[0]] && K.sent[x[0]].seen && K.nAns - K.sent[x[0]].at >= 10);      // met, and not just now
     if (opt.needHit) c = c.filter(x => x[1] >= 0);
     const r = K.w[w];
     if (c.length > 1 && r) c = c.filter(x => x[0] !== r.lastSent);
@@ -366,17 +367,23 @@
   }
 
   // ---------- what comes next ----------
+  const SITTING = 30 * 60000;
   function nextItem() {
     const now = new Date(), recentW = st.recent.slice(0, 2).map(x => x.w), last = recentW[0];
     const pc = pace();     // -3..3: faster means more new words and a little longer before things return
     const target = TARGET_R - 0.02 * pc, dueLimit = DUE_THRESHOLD + 4 * pc, youngCap = YOUNG_CAP + 3 * pc, teachEvery = pc > 0 ? 2 : pc < 0 ? 4 : 3;
-    const live = w => byWord[w] && !(K.w[w] && (K.w[w].drop || K.w[w].stage === 'wait'));
-    st.retry = st.retry.filter(x => live(x.w));
+    const cool = st.cool || {};
+    const parked = w => !!cool[w] && cool[w].fails >= 2 && Date.now() - cool[w].t < SITTING;      // missed twice: put aside for this sitting
+    const cooling = w => !!cool[w] && st.counter < cool[w].until;                                  // missed once: not again for a while
+    const base = w => byWord[w] && !(K.w[w] && (K.w[w].drop || K.w[w].stage === 'wait'));
+    const live = w => base(w) && !parked(w) && !cooling(w);
+    st.retry = st.retry.filter(x => base(x.w) && !parked(x.w));
     const item = x => ({ w: x.w, part: x.part, reason: x.reason, type: x.type });
-    // 1. wrong a few questions ago, or a follow-up check
+    // 1. something missed a while ago, or a follow-up check. Never two of these in a row.
+    const wasRetry = st.lastRetry; st.lastRetry = false;
     const ready = st.retry.filter(x => st.counter >= x.at);
-    const r1 = ready.find(x => x.w !== last);
-    if (r1) return item(r1);
+    const r1 = wasRetry ? null : ready.find(x => x.w !== last);
+    if (r1) { st.lastRetry = true; return item(r1); }
     const pending = new Set(st.retry.map(x => x.w));
     // 2. a part that is slipping, most likely still remembered first
     const due = [];
@@ -395,8 +402,9 @@
     if (a3) return { w: a3, part: openPart(a3) };
     // 4. find out and teach, about two to one
     const want = w => (K.w[w] ? K.w[w].want : 0);
-    const waitQ = Object.keys(K.w).filter(w => K.w[w].stage === 'wait' && !K.w[w].drop && byWord[w])
-      .sort((a, b) => (want(b) - want(a)) || (rankOf(a) - rankOf(b)));
+    // words to teach: wanted ones first, then those waiting longest (one you just missed goes to the back)
+    const waitQ = Object.keys(K.w).filter(w => K.w[w].stage === 'wait' && !K.w[w].drop && byWord[w] && !parked(w) && !cooling(w))
+      .sort((a, b) => (want(b) - want(a)) || ((K.w[a].waitT || 0) - (K.w[b].waitT || 0)) || (rankOf(a) - rankOf(b)));
     const findQ = order.filter(x => status(x.w) === 'untouched' && !pending.has(x.w)).map(x => x.w)
       .sort((a, b) => (want(b) - want(a)) || (rankOf(a) - rankOf(b)));
     const young = Object.keys(K.w).filter(w => K.w[w].stage === 'active' && !K.w[w].drop && !consolidated(K.w[w])).length;
@@ -657,6 +665,7 @@
         const res = { s: T(syl), m: T(mean, 'choice') };
         if (syl) res.t = T(tone);
         finish(task, { verdict: syl && tone && mean ? 'right' : 'wrong', res, answer: typed + ' | ' + opts[i].short,
+          shown: opts.map(o => o.w), picked: opts[i].w, typed,
           lines: [
             { label: 'Pinyin', ok: syl && tone, note: syl && tone ? typed : (syl ? 'the tones: ' : '') + 'you typed “' + typed + '”, it is ' + w.n.join(' or ') },
             { label: 'Meaning', ok: mean, note: mean ? opts[i].short : 'you chose “' + opts[i].short + '”' }] });
@@ -670,7 +679,8 @@
     gap(task, put) {
       const s = task.sent, inSent = new Set(wordToks(s).map(t => t.w));
       const opts = shuffle([byWord[task.word]].concat(distractorWords(task.word, 3, inSent)));
-      const answer = i => finish(task, { verdict: opts[i].w === task.word ? 'right' : 'wrong', res: { m: T(opts[i].w === task.word, 'choice') }, answer: opts[i].w });
+      const answer = i => finish(task, { verdict: opts[i].w === task.word ? 'right' : 'wrong', res: { m: T(opts[i].w === task.word, 'choice') }, answer: opts[i].w,
+        shown: opts.map(o => o.w), picked: opts[i].w });
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { m: T(false, 'choice') }, answer: '' });
       put(el('div', { class: 'prompt', text: 'Which word goes in the gap?' }), el('div', { class: 'en', text: s.en }), sentView(s, { gap: task.word }),
         el('div', { class: 'choices two' }, opts.map((o, i) => wordEl('button', o.w, null, { class: 'choice zh', text: o.w }, () => answer(i), true))));
@@ -788,6 +798,7 @@
       const res = { u: T(orderOk) };
       if (typed) { res.r = T(typedWord === task.word); if (typedWord === task.word) res.s = T(true); }
       finish(task, { verdict: ok ? 'right' : 'wrong', res, sres: ok ? (typed ? 'good' : 'hard') : 'again', answer: ans, diff: !ok, tiles: true,
+        shown: bank.concat(row).map(t => t.blank ? '?' : t.w), picked: row.map(t => t.blank ? typedWord : t.w), typed: typed ? typedWord : undefined,
         lines: typed ? [
           { label: 'Missing word', ok: typedWord === task.word, note: typedWord === task.word ? typedWord : 'you typed “' + typedWord + '”, it is ' + task.word },
           { label: 'Order', ok: orderOk, note: orderOk ? '' : 'not the order of the source sentence' }] : null,
@@ -812,13 +823,22 @@
     st.retry = st.retry.filter(x => x.w !== w);
     const stageBefore = before.stage;
     log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, sense: task.sense,
-      verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint,
+      verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, shown: out.shown, picked: out.picked, typed: out.typed,
+      ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint,
       prior: !before.intro && stageBefore === 'none' && !task.hint });      // "knew it already" only counts without the hint
     const failed = Object.keys(res).find(p => !res[p].ok);
-    if (K.w[w].stage !== 'wait' && task.reason !== 'follow') {
+    // a missed word is left alone for a while; missed twice in a sitting, it is put aside until later
+    st.cool = st.cool || {};
+    Object.keys(st.cool).forEach(x => { if (Date.now() - st.cool[x].t > SITTING) delete st.cool[x]; });
+    if (out.verdict === 'wrong') {
+      const c = st.cool[w] || { fails: 0 };
+      c.fails++; c.t = Date.now(); c.until = st.counter + 8; st.cool[w] = c;
+    } else if (out.verdict === 'right') delete st.cool[w];
+    const onceMore = !(st.cool[w] && st.cool[w].fails >= 2);
+    if (K.w[w].stage !== 'wait' && task.reason !== 'follow' && onceMore) {
       // could not produce a word that is not being taught: check later whether it is at least recognised
       if (res.r && !res.r.ok && stageBefore === 'none') st.retry.push({ w, type: 'read', reason: 'follow', at: st.counter + 8 });
-      else if (failed || out.verdict === 'wrong') st.retry.push({ w, part: failed || task.part || 'u', at: st.counter + 3 + rand(3) });
+      else if (failed || out.verdict === 'wrong') st.retry.push({ w, part: failed || task.part || 'u', at: st.counter + 8 + rand(4) });
     }
     if (task.slow && !st.retry.some(x => x.w === w) && K.w[w].stage !== 'wait')        // "slower": this word comes round again soon
       st.retry.push({ w, part: task.part || Object.keys(res)[0] || 'm', at: st.counter + 4 });
