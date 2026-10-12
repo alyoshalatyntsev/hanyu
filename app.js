@@ -3,7 +3,7 @@
   const D = window.DATA, F = window.FSRS;
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
-  const YOUNG_CAP = 12;       // at most this many words being learned and not yet consolidated
+  const YOUNG_CAP = 40;       // at most this many words being learned and not yet consolidated
   const SORT_BATCH = 40;
   const KEY = 'hanyu-v2';
   const fsrs = F.fsrs(F.generatorParameters({ request_retention: TARGET_R, enable_fuzz: false, enable_short_term: false }));
@@ -173,7 +173,7 @@
     // In play, and out of it. A word leaves play when you have typed it right twice in a sitting, at least eight
     // questions apart (once, if you typed it right before it was ever taught). It is "known" when typed right on a
     // second day. Missing its recall puts it back in play.
-    r.started = true; r.lastAns = +time;
+    r.started = true; r.lastAns = +time; r.lastN = K.nAns; r.lastOk = ev.verdict === 'right';
     if (res.r && res.r.how === 'typed') {
       if (res.r.ok) {
         r.rr = (r.rr || []).concat([{ n: K.nAns, d: day }]);
@@ -462,7 +462,7 @@
   function nextItem() {
     const now = new Date(), recentW = st.recent.slice(0, 3).map(x => x.w), last = recentW[0];
     const pc = pace();     // -3..3
-    const dueLimit = DUE_THRESHOLD + 4 * pc, inPlayCap = YOUNG_CAP + 3 * pc;
+    const dueLimit = DUE_THRESHOLD + 4 * pc, inPlayCap = YOUNG_CAP + 8 * pc;
     const cool = st.cool || {};
     const asks = st.asks || {};
     const parked = w => (!!cool[w] && cool[w].fails >= 2 && Date.now() - cool[w].t < SITTING) ||      // missed twice: put aside for this sitting
@@ -478,6 +478,10 @@
     if (r1) { st.lastRetry = true; return { w: r1.w }; }
     const pending = new Set(st.retry.map(x => x.w));
     const free = w => live(w) && !pending.has(w);
+    // a word you marked "want to learn" that has not come up yet (a level 1-3 word would otherwise be assumed known):
+    // it does not wait behind reviews, but takes at most one question in three
+    const wanted = Object.keys(K.w).filter(w => K.w[w].want && byWord[w] && status(w) === 'assumed' && free(w));
+    if (wanted.length && st.counter % 3 === 0) return { w: wanted[0], reason: 'findout' };
     // 2. a word out of play whose recall, use or meaning is slipping; the one most likely still remembered first
     const due = [];
     Object.keys(K.w).forEach(w => {
@@ -500,6 +504,10 @@
     // 3. words in play, the one that has waited longest first
     const playing = Object.keys(K.w).filter(w => base(w) && status(w) === 'learning');
     const canPlay = playing.filter(w => free(w) && !recentW.includes(w)).sort((a, b) => (K.w[a].lastAns || 0) - (K.w[b].lastAns || 0));
+    // Half of those turns go to a word you got right last time, at least eight questions ago, so that it moves on to
+    // typing while it is fresh; the other half to whichever word has waited longest.
+    const moving = canPlay.filter(w => K.w[w].lastOk && K.nAns - K.w[w].lastN >= 8);
+    const inPlay = () => ({ w: st.mix % 2 && moving.length ? moving[0] : canPlay[0] });
     // 4. new words: met for the first time, or taught from the don't-know list. Only while fewer than the cap are in play.
     const want = w => (K.w[w] ? K.w[w].want : 0);
     const waitQ = Object.keys(K.w).filter(w => K.w[w].stage === 'wait' && !K.w[w].drop && byWord[w] && !parked(w) && !cooling(w))
@@ -516,10 +524,10 @@
       return waitQ.length ? { intro: waitQ[0] } : null;
     };
     st.mix = (st.mix || 0) + 1;
-    if (canPlay.length && (st.mix % 3 !== 0 || !room)) return { w: canPlay[0] };      // two turns for words in play, one for a new word
+    if (canPlay.length && (st.mix % 3 !== 0 || !room)) return inPlay();      // two turns for words in play, one for a new word
     const fresh = newOne();
     if (fresh) return fresh;
-    if (canPlay.length) return { w: canPlay[0] };
+    if (canPlay.length) return inPlay();
     if (ready.length) return { w: ready[0].w };
     if (st.retry.length) return { w: (st.retry.find(y => y.w !== last) || st.retry[0]).w };
     // 5. nothing waiting: extra practice on words out of play
@@ -1198,7 +1206,7 @@
   }
   window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
-    pace, devices: () => devices,
+    pace, devices: () => devices, mark,
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
     current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
