@@ -129,6 +129,7 @@
         : (first && ev.prior) ? F.Rating.Easy : F.Rating.Good;
       part.card = fsrs.next(part.card, time, rating).card;
       if (o.ok) part.right++; else part.wrong++;
+      part.last = o.ok;
       part.src = o.how === 'implied' ? 'implied' : 'tested';
     });
     const bad = p => res[p] && !res[p].ok;
@@ -410,7 +411,7 @@
     else if (it.part === 'u') cyc = has ? (got('r') ? ['tilesType', 'retype', 'tiles'] : ['tiles']) : recall;
     else if (it.part === 'r') cyc = recall;
     else cyc = [has && 'retype', seen && 'typeBack', has && 'tilesType', hit && 'typedGap', 'meaningToWord'].filter(Boolean);
-    const n = r.cyc[it.part || 'x'] || 0;
+    const n = (r.cyc[it.part || 'x'] || 0) + (it.part === 't' ? byWord[w].i % 2 : 0);     // half the words start with the tones-only question
     let t = cyc[n % cyc.length];
     if (cyc.length > 1 && st.recent.length > 1 && st.recent[0].type === t && st.recent[1].type === t) t = cyc[(n + 1) % cyc.length];
     return t;
@@ -561,7 +562,7 @@
     const word = byWord[w], r = K.w[w] || { parts: {} }, now = new Date();
     const chip = p => {
       const part = r.parts[p], v = retr(part, now);
-      const cls = !part ? 'none' : part.src === 'said' ? 'said' : v >= TARGET_R ? 'good' : part.right === 0 ? 'bad' : 'slip';
+      const cls = !part ? 'none' : part.src === 'said' ? 'said' : part.last === false ? 'bad' : v >= TARGET_R ? 'good' : 'slip';     // red = wrong last time
       const how = !part ? 'not tested' : part.src === 'said' ? 'you said' : part.src === 'implied' ? 'implied' : part.right + ' right, ' + part.wrong + ' wrong';
       return el('span', { class: 'part ' + cls, title: how, text: PARTS[p] });
     };
@@ -614,8 +615,9 @@
         const res = { s: T(syl), m: T(mean, 'choice') };
         if (syl) res.t = T(tone);
         finish(task, { verdict: syl && tone && mean ? 'right' : 'wrong', res, answer: typed + ' | ' + opts[i].short,
-          why: [syl ? (tone ? '' : 'Tones: you typed “' + typed + '”, it is ' + w.n.join(' or ') + '.') : 'Pinyin: you typed “' + typed + '”, it is ' + w.n.join(' or ') + '.',
-            mean ? '' : 'Meaning: you chose “' + opts[i].short + '”.'].filter(Boolean).join(' ') });
+          lines: [
+            { label: 'Pinyin', ok: syl && tone, note: syl && tone ? typed : (syl ? 'the tones: ' : '') + 'you typed “' + typed + '”, it is ' + w.n.join(' or ') },
+            { label: 'Meaning', ok: mean, note: mean ? opts[i].short : 'you chose “' + opts[i].short + '”' }] });
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { m: T(false, 'choice'), s: T(false), t: T(false) }, answer: '' });
       put(el('div', { class: 'prompt', text: 'How is it said, and what does it mean?' }), bigWord(w.w, true), inp,
@@ -709,8 +711,9 @@
         const ok = v === normZh(s.zh), has = v.includes(task.word);
         finish(task, { verdict: ok ? 'right' : 'unchecked', res: has ? { r: T(true), s: T(true) } : { r: T(false) }, sres: ok ? 'good' : null,
           answer: v, diff: !ok,
-          why: ok ? '' : 'It differs from the sentence you met. The app cannot tell whether yours is also correct, so it is saved for checking later. ' +
-            (has ? 'You used ' + task.word + ', so the word counts as recalled.' : task.word + ' is not in your answer, so the word counts as not recalled.') });
+          lines: ok ? null : [
+            { label: 'The word ' + task.word, ok: has, note: has ? 'it is in your answer, so it counts as recalled' : 'it is not in your answer, so it counts as not recalled' },
+            { label: 'The sentence', ok: null, note: 'differs from the one you met. The app cannot tell whether yours is also correct, so it is saved for checking later' }] });
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, sres: 'again', answer: '' });
       put(el('div', { class: 'prompt', text: 'You have met this sentence. Type it in Chinese.' }), el('div', { class: 'en', text: s.en }),
@@ -757,7 +760,10 @@
       const res = { u: T(orderOk) };
       if (typed) { res.r = T(typedWord === task.word); if (typedWord === task.word) res.s = T(true); }
       finish(task, { verdict: ok ? 'right' : 'wrong', res, sres: ok ? (typed ? 'good' : 'hard') : 'again', answer: ans, diff: !ok, tiles: true,
-        why: ok ? '' : (typed && typedWord !== task.word ? 'The missing word was ' + task.word + '. ' : '') + (orderOk ? '' : 'Not the order of the source sentence.') });
+        lines: typed ? [
+          { label: 'Missing word', ok: typedWord === task.word, note: typedWord === task.word ? typedWord : 'you typed “' + typedWord + '”, it is ' + task.word },
+          { label: 'Order', ok: orderOk, note: orderOk ? '' : 'not the order of the source sentence' }] : null,
+        why: ok || typed ? '' : 'Not the order of the source sentence.' });
     };
     idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: typed ? { r: T(false), u: T(false) } : { u: T(false) }, sres: 'again', answer: '', tiles: true });
     check.addEventListener('click', go);
@@ -793,8 +799,14 @@
 
   function showResult(task, out) {
     const w = task.word, s = task.sent;
-    const label = { right: 'Right', wrong: out.idk ? 'Here it is' : 'Wrong', unchecked: 'Not checked' }[out.verdict];
-    const parts = [el('div', { class: 'verdict ' + out.verdict }, label, out.why ? el('span', { class: 'why', text: out.why }) : null)];
+    // a question that tests more than one part shows each part's result on its own line
+    const lines = out.idk ? null : out.lines;
+    const mixed = out.verdict === 'wrong' && lines && lines.some(l => l.ok) && lines.some(l => l.ok === false);
+    const cls = mixed ? 'partial' : out.verdict;
+    const label = out.idk ? 'Here it is' : { right: 'Right', wrong: 'Wrong', partial: 'Partly right', unchecked: 'Not checked' }[cls];
+    const parts = [el('div', { class: 'verdict ' + cls }, label, out.why ? el('span', { class: 'why', text: out.why }) : null,
+      lines ? lines.map(l => el('div', { class: 'vline ' + (l.ok === null ? 'unk' : l.ok ? 'ok' : 'bad') },
+        el('b', { text: (l.ok === null ? '? ' : l.ok ? '✓ ' : '✗ ') + l.label }), l.note ? ' — ' + l.note : '')) : null)];
     if (out.diff && s) {
       const [ya, yb] = diff(out.answer, normZh(s.zh));
       parts.push(el('div', { class: 'muted small', text: 'You typed' }), ya, el('div', { class: 'muted small', text: 'The sentence' }), yb);

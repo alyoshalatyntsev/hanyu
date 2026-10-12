@@ -112,3 +112,9 @@ button.idk:hover { background: var(--badbg); }
 button.hint { display: inline-block; margin-top: 8px; border: 1px solid var(--line); background: none; color: var(--muted); font: inherit; font-size: 13px;
   padding: 4px 12px; border-radius: 999px; cursor: pointer; }
 .hintline { margin-top: 8px; }
+.verdict.partial { background: #fbf1d5; color: #7a5a0e; }
+.vline { font-weight: 400; font-size: 14px; margin-top: 4px; }
+.vline.ok { color: var(--ok); }
+.vline.bad { color: var(--bad); }
+.vline.unk { color: var(--unk); }
+.vline .zh, .vline { font-family: inherit; }
