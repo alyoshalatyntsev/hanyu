@@ -400,12 +400,12 @@
     if (it.type) return it.type;
     if (it.reason === 'findout') return hit ? 'typedGap' : 'meaningToWord';
     if (it.reason === 'follow') return 'read';
-    if (it.part === 't') return 'tones';
     const seen = has && !!pickSent(w, { seenOnly: true });
     const recall = [has && 'tilesType', hit && 'typedGap', seen && 'typeBack', 'meaningToWord'].filter(Boolean);
     const got = p => r.parts[p] && r.parts[p].right > 0;
     let cyc;
-    if (it.part === 'm') cyc = (got('m') && hit) ? ['gap', 'read'] : ['read'];
+    if (it.part === 't') cyc = ['read', 'tones'];          // tones are asked with the meaning, or alone, in turn
+    else if (it.part === 'm') cyc = (got('m') && hit) ? ['read', 'gap'] : ['read'];
     else if (it.part === 's') cyc = got('r') ? recall : ['read'];
     else if (it.part === 'u') cyc = has ? (got('r') ? ['tilesType', 'retype', 'tiles'] : ['tiles']) : recall;
     else if (it.part === 'r') cyc = recall;
@@ -518,6 +518,14 @@
   }
   const pinyinLine = s => el('div', { class: 'pinyin small', text: s.t.map(t => t.k === 'p' ? '' : t.p.replace(/ \/ /g, '/')).filter(Boolean).join('  ') });
   const bigWord = (w, hide) => wordEl('div', w, null, { class: 'big', text: w }, null, hide);
+  // one click shows the first pinyin letter of the word; it is noted on the answer
+  function hintButton(task) {
+    const b = el('button', { class: 'hint', text: 'Hint', onclick: () => {
+      task.hint = true;
+      b.replaceWith(el('div', { class: 'muted small hintline', text: 'Starts with ' + byWord[task.word].n[0][0] }));
+    } });
+    return b;
+  }
   const idkButton = () => el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, '✗', el('span', { text: " I don't know" }));
 
   let sortTouched = false;
@@ -651,13 +659,12 @@
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, answer: '' });
       put(el('div', { class: 'prompt', text: 'Type the missing word.' }), el('div', { class: 'en', text: s.en }), sentView(s, { gap: task.word }),
-        el('div', { class: 'muted small hint', text: 'Missing word: ' + byWord[task.word].short }), inp, el('button', { class: 'primary', text: 'Check', onclick: go }));
+        el('div', { class: 'muted small', text: 'Missing word: ' + byWord[task.word].short }), inp, hintButton(task), el('button', { class: 'primary', text: 'Check', onclick: go }));
       onEnter = go; inp.focus();
     },
 
     meaningToWord(task, put) {
       const w = byWord[task.word], inp = textInput('the word, in characters');
-      const hint = w.n[0][0] + '…, ' + w.w.length + (w.w.length === 1 ? ' character' : ' characters');
       const go = () => {
         const v = normZh(inp.value); if (!v) return;
         const ok = v === w.w;
@@ -665,7 +672,7 @@
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, answer: '' });
       put(el('div', { class: 'prompt', text: 'Type the word.' }), el('div', { class: 'en', text: w.def }),
-        el('div', { class: 'muted small', text: 'Starts with ' + hint }), inp, el('button', { class: 'primary', text: 'Check', onclick: go }));
+        inp, hintButton(task), el('button', { class: 'primary', text: 'Check', onclick: go }));
       onEnter = go; inp.focus();
     },
 
@@ -757,7 +764,7 @@
     const tog = el('input', { type: 'checkbox' }); tog.checked = st.glosses;
     tog.addEventListener('change', () => { st.glosses = tog.checked; document.body.classList.toggle('noglosses', !st.glosses); save(); });
     put(el('div', { class: 'prompt', text: typed ? 'Build the sentence. One word is missing: type it.' : 'Build the sentence.' }),
-      el('div', { class: 'en', text: s.en }), rowEl, bankEl, inp, check, el('label', { class: 'toggle' }, tog, 'English on the tiles'));
+      el('div', { class: 'en', text: s.en }), rowEl, bankEl, inp, typed ? hintButton(task) : null, check, el('label', { class: 'toggle' }, tog, 'English on the tiles'));
     draw(); onEnter = go;
   }
 
@@ -771,8 +778,8 @@
     st.retry = st.retry.filter(x => x.w !== w);
     const stageBefore = before.stage;
     log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, sense: task.sense,
-      verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, ms: Date.now() - task.started, idk: !!out.idk,
-      prior: !before.intro && stageBefore === 'none' });
+      verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint,
+      prior: !before.intro && stageBefore === 'none' && !task.hint });      // "knew it already" only counts without the hint
     const failed = Object.keys(res).find(p => !res[p].ok);
     if (K.w[w].stage !== 'wait' && task.reason !== 'follow') {
       // could not produce a word that is not being taught: check later whether it is at least recognised

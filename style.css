@@ -109,3 +109,6 @@ button.idk:hover { background: var(--badbg); }
 #wordmenu button { display: block; width: 100%; text-align: left; border: 0; background: none; font: inherit; font-size: 14px; padding: 8px 10px; border-radius: 6px; cursor: pointer; color: var(--fg); }
 #wordmenu button:hover { background: var(--unkbg); }
 .tile, .tok, .chip, .choice.zh { -webkit-touch-callout: none; }
+button.hint { display: inline-block; margin-top: 8px; border: 1px solid var(--line); background: none; color: var(--muted); font: inherit; font-size: 13px;
+  padding: 4px 12px; border-radius: 999px; cursor: pointer; }
+.hintline { margin-top: 8px; }
