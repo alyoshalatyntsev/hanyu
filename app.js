@@ -658,6 +658,17 @@
     if (latin) i.style.fontFamily = 'inherit'; else i.setAttribute('lang', 'zh-CN');
     return i;
   }
+  // The names in a sentence, to tap into the box: typing a name is not what is being practised.
+  function nameTags(s, inp, task) {
+    const names = [...new Set(s.t.filter(t => t.k === 'n').map(t => t.w))];
+    if (!names.length) return '';
+    return el('div', { class: 'names' }, names.map(n => el('button', { class: 'chip name', text: n, title: 'Put this name in', onclick: () => {
+      const a = inp.selectionStart == null ? inp.value.length : inp.selectionStart, b = inp.selectionEnd == null ? a : inp.selectionEnd;
+      inp.value = inp.value.slice(0, a) + n + inp.value.slice(b);
+      inp.focus(); inp.setSelectionRange(a + n.length, a + n.length);
+      (task.tapped = task.tapped || []).push(n);
+    } })));
+  }
   function sentView(s, opt) {
     opt = opt || {};
     const line = el('div', { class: 'sent' });
@@ -890,7 +901,7 @@
             answer: v, diff: !ok, why: ok ? '' : 'Not the sentence that was shown.' });
         };
         put(el('div', { class: 'prompt', text: 'Type the sentence you just read.' }), el('div', { class: 'en', text: s.en }),
-          inp, el('button', { class: 'primary', text: 'Check', onclick: go }));
+          inp, nameTags(s, inp, task), el('button', { class: 'primary', text: 'Check', onclick: go }));
         onEnter = go; inp.focus();
       };
       const hide = () => {
@@ -917,7 +928,7 @@
       };
       idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, sres: 'again', answer: '' });
       put(el('div', { class: 'prompt', text: 'You have met this sentence. Type it in Chinese.' }), el('div', { class: 'en', text: s.en }),
-        inp, el('button', { class: 'primary', text: 'Check', onclick: go }));
+        inp, nameTags(s, inp, task), el('button', { class: 'primary', text: 'Check', onclick: go }));
       onEnter = go; inp.focus();
     },
   };
@@ -999,7 +1010,7 @@
     Object.keys(res).forEach(p => { pred[p] = before.parts[p] ? +retr(before.parts[p], new Date()).toFixed(3) : null; });
     log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, sense: task.sense,
       verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, shown: out.shown, picked: out.picked, typed: out.typed,
-      ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint,
+      ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint, tapped: task.tapped,
       prior: !before.intro && stageBefore === 'none' && !task.hint,       // "knew it already" only counts without the hint
       pred, p: TASK[task.type] && !task.check ? +pRight(w, task.type, new Date()).toFixed(3) : null });
     // A miss of the word itself (not pinyin, not tile order): it is left alone for a while, and comes back once.
@@ -1188,6 +1199,8 @@
   window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
     pace, devices: () => devices,
+    // for testing: put one particular question on screen
+    show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
     current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
