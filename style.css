@@ -78,13 +78,15 @@ body.noglosses .tile .g { display: none; }
 .zh { font-family: var(--zh); }
 .big { cursor: default; }
 button.wide { display: block; width: 100%; margin-top: 8px; padding: 10px; text-align: center; color: var(--muted); }
-.under { display: flex; justify-content: space-between; align-items: center; margin-top: 22px; gap: 8px; }
-button.idk { border: 2px solid var(--badbg); background: none; color: var(--bad); font: inherit; cursor: pointer; border-radius: 16px;
-  padding: 6px 22px 8px; display: flex; flex-direction: column; align-items: center; line-height: 1.1; }
-button.idk .x { font-size: 40px; font-weight: 600; }
-button.idk .lbl { font-size: 12px; }
-button.pace { border: 1px solid var(--line); background: none; color: var(--muted); font: inherit; font-size: 14px; padding: 10px 14px; border-radius: 999px; cursor: pointer; }
-button.pace:hover { border-color: var(--fg); color: var(--fg); }
+/* under every question: one bar, three cells */
+.under { display: grid; grid-template-columns: 1fr 1.3fr 1fr; margin-top: 20px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--card); }
+.under button { border: 0; border-radius: 0; background: none; font: inherit; font-size: 14px; color: var(--muted); height: 54px; cursor: pointer; padding: 0 8px; }
+.under button + button { border-left: 1px solid var(--line); }
+.under button:hover { background: var(--unkbg); color: var(--fg); }
+.under button.idk { color: var(--bad); display: flex; align-items: center; justify-content: center; gap: 8px; }
+.under button.idk:hover { background: var(--badbg); color: var(--bad); }
+button.idk .x { font-size: 30px; font-weight: 600; line-height: 1; }
+button.idk .lbl { font-size: 14px; }
 button.idk:hover { background: var(--badbg); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
@@ -114,12 +116,17 @@ button.idk:hover { background: var(--badbg); }
 #wordmenu button { display: block; width: 100%; text-align: left; border: 0; background: none; font: inherit; font-size: 14px; padding: 8px 10px; border-radius: 6px; cursor: pointer; color: var(--fg); }
 #wordmenu button:hover { background: var(--unkbg); }
 .tile, .tok, .chip, .choice.zh { -webkit-touch-callout: none; }
-button.hint { display: inline-block; margin-top: 8px; border: 1px solid var(--line); background: none; color: var(--muted); font: inherit; font-size: 13px;
-  padding: 4px 12px; border-radius: 999px; cursor: pointer; }
-.hintline { margin-top: 8px; }
+button.hint { display: block; margin: 6px 0 0 auto; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 2px 0;
+  cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+button.hint:hover { color: var(--fg); }
+.hintline { margin-top: 6px; text-align: right; }
 .verdict.partial { background: #fbf1d5; color: #7a5a0e; }
 .vline { font-weight: 400; font-size: 14px; margin-top: 4px; }
 .vline.ok { color: var(--ok); }
 .vline.bad { color: var(--bad); }
 .vline.unk { color: var(--unk); }
 .vline .zh, .vline { font-family: inherit; }
+.sent .tok.noted { border-bottom: 2px solid var(--bad); }
+#toast i { font-style: normal; opacity: .75; }
+.devices div { margin: 1px 0; }
+button.primary { margin-top: 12px; }

@@ -92,6 +92,7 @@
   function apply(ev) {
     const time = new Date(ev.t);
     if (ev.k === 'reset') { K = blank(); return; }       // start again from nothing; what came before stays in the record
+    if (ev.k === 'device') { devices[ev.dev || ev.id.split('-')[0]] = ev.info; return; }
     if (ev.k === 'sorted') { ev.ws.forEach(w => { K.sorted[w] = true; }); return; }
     if (ev.k === 'flag') { if (ev.flag === 'bad sentence' && ev.sid) { if (ev.on) K.retired[ev.sid] = true; else delete K.retired[ev.sid]; } return; }
     if (!ev.w) return;
@@ -114,6 +115,14 @@
       else if (ev.v === 'unwant') r.want = 0;
       else if (ev.v === 'drop') r.drop = true;
       else if (ev.v === 'undrop') r.drop = false;
+      return;
+    }
+    if (ev.k === 'look') {          // you clicked the word to see what it is: counted as not knowing its meaning
+      if (!ev.noted || !byWord[ev.w]) return;
+      const part = r.parts.m || (r.parts.m = { card: F.createEmptyCard(time), right: 0, wrong: 0, src: null });
+      part.card = fsrs.next(part.card, time, F.Rating.Again).card; part.wrong++; part.last = false; part.src = 'tested';
+      if (r.mark === 'easy') r.mark = null;
+      if (r.stage === 'none') { r.stage = 'wait'; r.knows = false; r.diag = null; }
       return;
     }
     if (ev.k === 'intro' || ev.k === 'start') { r.stage = 'active'; r.act = +time; if (ev.k === 'intro') r.intro = +time; return; }
@@ -154,12 +163,14 @@
     }
     if (ev.part) r.cyc[ev.part] = (r.cyc[ev.part] || 0) + 1;     // how many times each kind of step has been done, to rotate tasks
   }
+  let devices = {};      // device name -> what kind of device it said it was
   function rebuild() {
-    K = blank();
-    events.forEach(apply);
+    K = blank(); devices = {};
+    const undone = new Set(events.filter(e => e.k === 'undo').map(e => e.ref));
+    events.forEach(e => { if (!undone.has(e.id)) apply(e); });
   }
   function log(ev) {
-    ev.t = new Date().toISOString(); ev.id = st.dev + '-' + (++st.seq);
+    ev.t = new Date().toISOString(); ev.id = st.dev + '-' + (++st.seq); ev.dev = st.dev;
     events.push(ev); apply(ev); save();
     persist([ev]); syncSoon();
     return ev;
@@ -335,18 +346,20 @@
   }
 
   // ---------- pace: "slower" and "faster" nudge how much is new and how soon things come back. The nudge wears off. ----------
-  const PACE_FADE = 50;       // answers after which one step of a nudge has worn off
+  // It wears off mainly with real time (so it is gone by the next day you open the app), and also with use.
+  const PACE_HOURS = 6;       // hours of real time after which one step has worn off
+  const PACE_ANSWERS = 60;    // ...or this many answers
   function pace() {
-    const steps = Math.floor((st.counter - (st.paceAt || 0)) / PACE_FADE);
+    const steps = Math.floor((Date.now() - (st.paceTime || 0)) / (PACE_HOURS * 3600000)) + Math.floor((st.counter - (st.paceAt || 0)) / PACE_ANSWERS);
     if (steps > 0) {
       if (st.pace) st.pace -= Math.sign(st.pace) * Math.min(Math.abs(st.pace), steps);
-      st.paceAt = st.counter;
+      st.paceAt = st.counter; st.paceTime = Date.now();
     }
     return st.pace || 0;
   }
   function nudge(d) {
     pace();
-    st.pace = Math.max(-3, Math.min(3, (st.pace || 0) + d)); st.paceAt = st.counter;
+    st.pace = Math.max(-3, Math.min(3, (st.pace || 0) + d)); st.paceAt = st.counter; st.paceTime = Date.now();
     log({ k: 'pace', d, now: st.pace });
     if (current && !current.done) { if (d > 0) current.fast = true; else current.slow = true; }
     toast(st.pace === 0 ? 'Back to the normal pace' : (st.pace > 0 ? 'Going faster' : 'Going slower') + ' for a while');
@@ -469,10 +482,14 @@
     if (tok && tok.p) return { p: tok.p, g: tok.g };
     return byWord[w] ? { p: readings(w), g: byWord[w].short } : { p: '', g: '' };
   }
-  function showInfo(w, tok) {
+  // clicking a word shows what it is, and is remembered as not having known it (unless it is the word just asked about)
+  function showInfo(w, tok, node) {
     const i = infoOf(w, tok);
-    log({ k: 'look', w, during: !!(current && !current.done) });
-    toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : '')));
+    const noted = !!byWord[w] && !(current && current.word === w);
+    const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null });
+    if (noted && node) node.classList.add('noted');
+    toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), noted ? el('i', { text: '  · noted as not known' }) : ''),
+      noted ? () => { log({ k: 'undo', ref: ev.id }); rebuild(); if (node) node.classList.remove('noted'); } : null);
   }
   function wordMenu(w, tok, x, y, hideInfo) {
     const m = $('wordmenu'), r = K.w[w] || {}, i = infoOf(w, tok);
@@ -497,7 +514,7 @@
       if (e.shiftKey) { e.preventDefault(); mark(w, 'unknown'); }
       else if (e.ctrlKey || e.metaKey) { e.preventDefault(); mark(w, 'easy'); }
       else if (plain) plain(e);
-      else if (!hideInfo) showInfo(w, tok);
+      else if (!hideInfo) showInfo(w, tok, n);
     });
     n.addEventListener('contextmenu', e => { e.preventDefault(); wordMenu(w, tok, e.clientX, e.clientY, hideInfo); });
     n.addEventListener('touchstart', e => {
@@ -550,9 +567,9 @@
   }
   // under every question: slower · I don't know · faster
   const idkButton = () => el('div', { class: 'under' },
-    el('button', { class: 'pace slower', title: 'More repetition and fewer new words for a while', text: '« slower', onclick: () => nudge(-1) }),
+    el('button', { class: 'pace slower', title: 'More repetition and fewer new words for a while', text: '‹ slower', onclick: () => nudge(-1) }),
     el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, el('span', { class: 'x', text: '✗' }), el('span', { class: 'lbl', text: "I don't know" })),
-    el('button', { class: 'pace faster', title: 'More new words and fewer easy steps for a while', text: 'faster »', onclick: () => nudge(1) }));
+    el('button', { class: 'pace faster', title: 'More new words and fewer easy steps for a while', text: 'faster ›', onclick: () => nudge(1) }));
 
   let sortTouched = false;
   function showSort(batch) {
@@ -880,7 +897,7 @@
       Object.keys(r.parts).forEach(p => { o.parts[PARTS[p]] = { chance: +retr(r.parts[p], now).toFixed(3), how: r.parts[p].src, right: r.parts[p].right, wrong: r.parts[p].wrong }; });
       picture[w] = o;
     });
-    const blob = new Blob([JSON.stringify({ exported: now.toISOString(), device: st.dev, picture, events }, null, 1)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ exported: now.toISOString(), device: st.dev, devices, picture, events }, null, 1)], { type: 'application/json' });
     const a = el('a', { href: URL.createObjectURL(blob), download: 'hanyu-' + today() + '.json' });
     document.body.append(a); a.click(); a.remove();
   }
@@ -901,6 +918,9 @@
         : st.sync.last ? 'Synced ' + new Date(st.sync.last).toLocaleString() + ' · ' + (st.sync.devices || 1) + (st.sync.devices > 1 ? ' devices' : ' device')
         : 'Not synced yet' }) : el('div', { class: 'small muted syncline', text: 'This copy does not sync (opened from the folder).' }),
       canSync() ? el('button', { class: 'plain', text: 'Sync now', onclick: () => { sync().then(openMenu); } }) : null,
+      el('h3', { text: 'Devices' }),
+      el('div', { class: 'small devices' }, [...new Set(events.map(e => e.dev || e.id.split('-')[0]))].map(d => el('div', {
+        text: deviceLabel(d) + (d === st.dev ? ', this one' : '') + ': ' + events.filter(e => e.k === 'ans' && (e.dev || e.id.split('-')[0]) === d).length + ' answers' }))),
       unsorted.length ? el('button', { class: 'plain', text: 'Sort another ' + Math.min(SORT_BATCH, unsorted.length) + ' words now',
         onclick: () => { $('menu').hidden = true; showSort(unsorted.slice(0, SORT_BATCH)); } }) : null,
       el('h3', { text: 'Data' }),
@@ -928,10 +948,23 @@
   document.body.classList.toggle('noglosses', !st.glosses);
   let idle = null;      // 'sort' | 'done' while a screen is up that newly arrived events could make stale
   onMerged = () => { if (idle === 'done' || (idle === 'sort' && !sortTouched)) advance(); };
+  function describeDevice() {
+    const ua = navigator.userAgent;
+    const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows'
+      : /Mac OS X/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'unknown system';
+    const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'browser';
+    const kind = /iPhone|Mobile/.test(ua) ? 'phone' : /iPad|Android/.test(ua) ? 'tablet' : 'computer';
+    return { os, browser, kind, screen: screen.width + 'x' + screen.height, touch: navigator.maxTouchPoints > 0,
+      installed: matchMedia('(display-mode: standalone)').matches, ua };
+  }
+  const deviceLabel = d => (devices[d] ? devices[d].os + ' ' + devices[d].kind + ' · ' + devices[d].browser : 'a device that has not described itself yet') + ' (' + d + ')';
   async function init() {
     await loadEvents();
     rebuild();
-    if (canSync() && !events.length) {       // a new device: fetch the history before showing anything
+    const fresh = !events.length;
+    const info = describeDevice(), sig = [info.os, info.browser, info.kind, info.screen, info.installed].join('|');
+    if (st.devSig !== sig) { log({ k: 'device', info }); st.devSig = sig; save(); }       // said once per device, and again if it changes
+    if (canSync() && fresh) {       // a new device: fetch the history before showing anything
       screen('', el('p', { class: 'muted', text: 'Getting your history…' }));
       await Promise.race([sync(), new Promise(r => setTimeout(r, 8000))]);
     } else if (canSync()) setTimeout(sync, 1500);
@@ -940,7 +973,7 @@
   }
   window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
-    pace,
+    pace, devices: () => devices,
     current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
