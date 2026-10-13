@@ -95,7 +95,11 @@
     if (cached && cached.data && cached.data.v === DATA_VERSION) {
       await start(cached.data);
       // pick up a newer data file for next time; a dead token or no network never blocks practice
-      fetchData(token, cached.etag).then(got => got && got.data.v === DATA_VERSION && cacheSet(got)).catch(() => {});
+      fetchData(token, cached.etag).then(async got => {
+        if (!got || got.data.v !== DATA_VERSION) return;
+        await cacheSet(got);
+        window.dispatchEvent(new Event('hanyu-newdata'));       // the app loads it at once, or offers to
+      }).catch(() => {});
       return;
     }
     try {

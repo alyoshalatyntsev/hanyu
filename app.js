@@ -1,6 +1,8 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
+  const RELEASE = 22;         // shown in the menu; goes up with the cache name in sw.js
+  const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
   const YOUNG_CAP = 40;       // at most this many words being learned and not yet consolidated
@@ -210,7 +212,7 @@
     else if (ev.idk && bad('m')) { r.stage = 'wait'; r.knows = false; r.intro = 0; r.waitT = +time; }   // "I don't know" what it means: teach it again
     if (ev.sid) {
       const sr = K.sent[ev.sid] || (K.sent[ev.sid] = { card: F.createEmptyCard(time), right: 0, wrong: 0, seen: 0 });
-      sr.seen++; sr.at = K.nAns;
+      sr.seen++; sr.at = K.nAns; sr.t = +new Date(ev.t);
       if (ev.sres) {
         sr.card = fsrs.next(sr.card, time, { good: F.Rating.Good, hard: F.Rating.Hard, again: F.Rating.Again }[ev.sres]).card;
         if (ev.sres === 'again') sr.wrong++; else sr.right++;
@@ -377,8 +379,11 @@
   // sentence for a word: one that shows a meaning you have succeeded with least, seen least, not the last one used
   function pickSent(w, opt) {
     opt = opt || {};
-    let c = sentsOf(w);
-    if (opt.seenOnly) c = c.filter(x => K.sent[x[0]] && K.sent[x[0]].seen && K.nAns - K.sent[x[0]].at >= 10);      // met, and not just now
+    // A sentence is shown at most once in twenty hours, whichever word it is for and whatever the question. (Before
+    // 14 October a word with one or two sentences got the same one question after question.) Typing a sentence back
+    // from memory therefore only happens on a later day.
+    let c = sentsOf(w).filter(x => { const k = K.sent[x[0]]; return !k || !k.t || Date.now() - k.t > SENT_REST; });
+    if (opt.seenOnly) c = c.filter(x => K.sent[x[0]] && K.sent[x[0]].seen);      // met before
     if (opt.needHit) c = c.filter(x => x[1] >= 0);
     if (opt.short) c = c.filter(x => !S[x[0]].long);      // longer sentences are for reading and gaps, not for tiles or retyping
     const r = K.w[w];
@@ -568,7 +573,7 @@
     const hit = !!pickSent(w, { needHit: true }), short = !!pickSent(w, { short: true });
     const tilesLately = st.recent.slice(0, 4).some(x => x.type === 'tiles');       // tile order cannot be fully marked: at most one in five
     const can = [hit && 'gap', short && !tilesLately && 'tiles', short && 'tilesType', hit && 'typedGap', short && 'retype', pickSent(w, { seenOnly: true, short: true }) && 'typeBack'].filter(Boolean);
-    return can.length ? can : ['read', 'meaningToWord'];
+    return can.length ? can : ['meaningToWord'];       // every sentence of the word has been shown today: ask for the word from its meaning instead
   }
   function chooseTask(w) {
     const now = new Date(), floor = Math.min(0.8, Math.max(0.5, 0.6 - 0.05 * pace()));
@@ -1407,7 +1412,8 @@
         [['marked trivially easy', n('easy')], ['known (typed right on two days)', n('known')], ['typed right today, to be asked again another day', n('resting')], ['in play', n('learning')], ['waiting to be taught', n('wait')],
           ['not looked at yet', n('untouched')], ['not shown', n('drop')]].map(x => el('div', { text: x[1] + '  ' + x[0] })),
         below ? el('div', { text: below + '  words of other levels in play (you marked, clicked or missed them)' }) : null,
-        el('div', { class: 'muted', text: events.filter(e => e.k === 'ans').length + ' answers recorded' })),
+        el('div', { class: 'muted', text: events.filter(e => e.k === 'ans').length + ' answers recorded' }),
+        el('div', { class: 'muted', text: 'App version ' + RELEASE + (D.built ? ', words and sentences of ' + D.built : '') })),
       canSync() ? el('div', { class: 'small muted syncline', text: st.sync.err ? 'Sync is not working: ' + st.sync.err + '. It will try again by itself.'
         : st.sync.last ? 'Synced ' + new Date(st.sync.last).toLocaleString() + ' · ' + (st.sync.devices || 1) + (st.sync.devices > 1 ? ' devices' : ' device')
         : 'Not synced yet' }) : el('div', { class: 'small muted syncline', text: 'This copy does not sync (opened from the folder).' }),
@@ -1440,6 +1446,14 @@
     $('menu').hidden = false;
   }
   $('menuBtn').addEventListener('click', openMenu);
+  // Newer words and sentences arrived while the app was open: load them at once if nothing has been answered yet in
+  // this visit, otherwise offer it.
+  const counterAtLoad = () => window.__counterAtLoad;
+  window.addEventListener('hanyu-newdata', () => {
+    if (st.counter === counterAtLoad()) return location.reload();
+    toast(el('span', null, 'New words and sentences have arrived.  ', el('button', { text: 'load them', onclick: () => location.reload() })));
+    clearTimeout(toast.timer);
+  });
   $('menu').addEventListener('click', e => { if (e.target === $('menu')) $('menu').hidden = true; });
 
   document.body.classList.toggle('noglosses', !st.glosses);
@@ -1478,5 +1492,5 @@
     current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
-  window.__app.ready = init().then(() => { window.__app.started = true; });
+  window.__app.ready = init().then(() => { window.__counterAtLoad = st.counter; window.__app.started = true; });
 })();
