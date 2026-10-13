@@ -1150,6 +1150,7 @@
     const missed = out.idk || Object.keys(out.res || {}).some(p => p !== 'u' && !out.res[p].ok);
     parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : null).filter(Boolean));
     if (s) parts.push(el('div', { class: 'src', text: s.src === 'gw' ? 'Sentence: an example from the AllSet Learning Chinese Grammar Wiki (non-commercial use, with attribution).'
+      : s.src === 'ted' ? 'Sentence: a subtitle line from a TED talk, with the English line it translates (OPUS TED2020; TED talks are CC BY-NC-ND). The pair was checked by a model, not by a person.'
       : 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
     // feedback is one quiet link; it opens the flags and the note
     const flagRow = el('div', { class: 'flags' });
