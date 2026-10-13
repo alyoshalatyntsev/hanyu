@@ -7,6 +7,8 @@
   const SORT_BATCH = 40;
   const KEY = 'hanyu-v2';
   const fsrs = F.fsrs(F.generatorParameters({ request_retention: TARGET_R, enable_fuzz: false, enable_short_term: false }));
+  const TASKNAME = { gap: 'gap with choices', read: 'pinyin and meaning', retype: 'read, hide, retype', tiles: 'tiles', tilesType: 'typed tiles', typedGap: 'typed gap',
+    meaningToWord: 'type the word', typeBack: 'type back' };
   const PARTS = { m: 'meaning', s: 'syllables', t: 'tones', r: 'recall', u: 'use' };
 
   const words = D.words, S = D.sentences, byWord = {};
@@ -95,7 +97,7 @@
     retype: { part: 'u', g: 0, d: -1.0 }, tiles: { part: 'u', g: 0, d: -0.3 },
     tilesType: { part: 'r', g: 0, d: 0.0 }, typedGap: { part: 'r', g: 0, d: 0.4 }, meaningToWord: { part: 'r', g: 0, d: 0.6 }, typeBack: { part: 'r', g: 0, d: 1.0 },
   };
-  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {}, nAns: 0, ms: {},
+  const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {}, nAns: 0, ms: {}, read: {},
     d: Object.fromEntries(Object.keys(TASK).map(t => [t, TASK[t].d])) });
   // The scheduler counts days by the UTC calendar. Times are shifted so that its day turns over at 4 am local time
   // (tz = minutes behind UTC where the event happened; older events have none and are taken as China time).
@@ -105,6 +107,13 @@
     if (ev.k === 'reset') { K = blank(); return; }       // start again from nothing; what came before stays in the record
     if (ev.k === 'device') { devices[ev.dev || ev.id.split('-')[0]] = ev.info; return; }
     if (ev.k === 'sorted') { ev.ws.forEach(w => { K.sorted[w] = true; }); return; }
+    if (ev.k === 'read') {         // an exam item: only whether it has been done, how it went and when
+      const x = K.read[ev.rid] || (K.read[ev.rid] = { n: 0, right: 0, wrong: 0 });
+      x.n++; if (ev.ok) x.right++; else x.wrong++;
+      x.last = !!ev.ok; x.t = +new Date(ev.t);
+      return;
+    }
+    if (ev.k === 'flag' && ev.rid) { if (ev.flag === 'bad item') { if (ev.on) K.retired['r:' + ev.rid] = true; else delete K.retired['r:' + ev.rid]; } return; }
     if (ev.k === 'flag') { if (ev.flag === 'bad sentence' && ev.sid) { if (ev.on) K.retired[ev.sid] = true; else delete K.retired[ev.sid]; } return; }
     if (!ev.w) return;
     const r = rec(ev.w);
@@ -124,6 +133,7 @@
         if (r.mark === 'unknown' && r.stage === 'wait') r.stage = 'none';
         r.mark = null;
       } else if (ev.v === 'want') r.want = 1;
+      else if (ev.v === 'nowant') r.want = -1;
       else if (ev.v === 'unwant') r.want = 0;
       else if (ev.v === 'drop') r.drop = true;
       else if (ev.v === 'undrop') r.drop = false;
@@ -325,7 +335,7 @@
       if (!r.left) return 'learning';
       return (r.before || new Set((r.rr || []).map(x => x.d)).size >= 2) ? 'known' : 'resting';      // resting: out of play, to be typed again another day
     }
-    return word && word.lv === D.level ? 'untouched' : 'assumed';
+    return !word || word.lv < D.level ? 'assumed' : word.lv === D.level ? 'untouched' : 'beyond';       // beyond: above the level being worked on; in the data, not active until you ask
   }
   // the chance that a part of a word is there right now
   function partR(w, p, now) {
@@ -370,12 +380,15 @@
     let c = sentsOf(w);
     if (opt.seenOnly) c = c.filter(x => K.sent[x[0]] && K.sent[x[0]].seen && K.nAns - K.sent[x[0]].at >= 10);      // met, and not just now
     if (opt.needHit) c = c.filter(x => x[1] >= 0);
+    if (opt.short) c = c.filter(x => !S[x[0]].long);      // longer sentences are for reading and gaps, not for tiles or retyping
     const r = K.w[w];
     if (c.length > 1 && r) c = c.filter(x => x[0] !== r.lastSent);
     if (!c.length) return null;
     // first: as few other words you don't know as possible (ideally the word asked about is the only new thing)
-    const shaky = x => wordToks(S[x[0]]).filter(t => t.w !== w && byWord[t.w] && ['wait', 'learning', 'checking', 'untouched'].includes(status(t.w))).length;
-    const score = x => shaky(x) * 1000 + ((r && r.senses[x[1]] ? r.senses[x[1]].right : 0) * 10) + (K.sent[x[0]] ? K.sent[x[0]].seen : 0);
+    const shaky = x => wordToks(S[x[0]]).filter(t => t.w !== w && byWord[t.w] && ['wait', 'learning', 'checking', 'untouched', 'beyond'].includes(status(t.w))).length;
+    // a word out of play gets a longer sentence when it has one (more to read); a word in play gets a short one
+    const wantLong = !opt.short && r && ['known', 'resting', 'easy'].includes(status(w));
+    const score = x => (wantLong ? (S[x[0]].long ? 0 : 3000) : (S[x[0]].long ? 500 : 0)) + shaky(x) * 1000 + ((r && r.senses[x[1]] ? r.senses[x[1]].right : 0) * 10) + (K.sent[x[0]] ? K.sent[x[0]].seen : 0);
     const best = Math.min(...c.map(score));
     c = c.filter(x => score(x) === best);
     return c[rand(c.length)];
@@ -425,14 +438,14 @@
   function diff(a, b) {
     const m = a.length, n = b.length, L = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
     for (let i = m - 1; i >= 0; i--) for (let j = n - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-    const ya = el('div', { class: 'yours' }), yb = el('div', { class: 'yours missing' });
+    const ya = el('div', { class: 'yours typed' }), yb = el('div', { class: 'yours missing' }), miss = new Set();      // miss: places in b that a lacks
     let i = 0, j = 0;
     while (i < m || j < n) {
       if (i < m && j < n && a[i] === b[j]) { ya.append(a[i]); yb.append(b[j]); i++; j++; }
-      else if (j < n && (i === m || L[i][j + 1] >= L[i + 1][j])) { yb.append(el('ins', { text: b[j] })); j++; }
+      else if (j < n && (i === m || L[i][j + 1] >= L[i + 1][j])) { yb.append(el('ins', { text: b[j] })); miss.add(j); j++; }
       else { ya.append(el('del', { text: a[i] })); i++; }
     }
-    return [ya, yb];
+    return [ya, yb, miss];
   }
 
   // ---------- pace: "slower" and "faster" nudge how much is new and how soon things come back. The nudge wears off. ----------
@@ -478,9 +491,11 @@
     if (r1) { st.lastRetry = true; return { w: r1.w }; }
     const pending = new Set(st.retry.map(x => x.w));
     const free = w => live(w) && !pending.has(w);
+    // reading: one question in four is an item from an HSK 4 exam paper (see pickReading)
+    if (R.length && !st.noReading && (st.sinceReading || 0) >= READ_EVERY - 1) { const item = pickReading(); if (item) return { reading: item }; }
     // a word you marked "want to learn" that has not come up yet (a level 1-3 word would otherwise be assumed known):
     // it does not wait behind reviews, but takes at most one question in three
-    const wanted = Object.keys(K.w).filter(w => K.w[w].want && byWord[w] && status(w) === 'assumed' && free(w));
+    const wanted = Object.keys(K.w).filter(w => K.w[w].want > 0 && byWord[w] && ['assumed', 'beyond'].includes(status(w)) && free(w));
     if (wanted.length && st.counter % 3 === 0) return { w: wanted[0], reason: 'findout' };
     // 2. a word out of play whose recall, use or meaning is slipping; the one most likely still remembered first
     const due = [];
@@ -548,9 +563,10 @@
   function available(w) {
     const has = sentsOf(w).length > 0;
     if (!has) return ['read', 'meaningToWord'];
-    const hit = !!pickSent(w, { needHit: true });
+    const hit = !!pickSent(w, { needHit: true }), short = !!pickSent(w, { short: true });
     const tilesLately = st.recent.slice(0, 4).some(x => x.type === 'tiles');       // tile order cannot be fully marked: at most one in five
-    return [hit && 'gap', !tilesLately && 'tiles', 'tilesType', hit && 'typedGap', 'retype', pickSent(w, { seenOnly: true }) && 'typeBack'].filter(Boolean);
+    const can = [hit && 'gap', short && !tilesLately && 'tiles', short && 'tilesType', hit && 'typedGap', short && 'retype', pickSent(w, { seenOnly: true, short: true }) && 'typeBack'].filter(Boolean);
+    return can.length ? can : ['read', 'meaningToWord'];
   }
   function chooseTask(w) {
     const now = new Date(), floor = Math.min(0.8, Math.max(0.5, 0.6 - 0.05 * pace()));
@@ -568,7 +584,7 @@
   function makeTask(it) {
     const type = typeFor(it), w = it.w;
     const needsSent = !['read', 'tones', 'meaningToWord'].includes(type);
-    const pick = needsSent ? pickSent(w, { seenOnly: type === 'typeBack', needHit: type === 'gap' || type === 'typedGap' }) : null;
+    const pick = needsSent ? pickSent(w, { seenOnly: type === 'typeBack', needHit: type === 'gap' || type === 'typedGap', short: type !== 'gap' && type !== 'typedGap' }) : null;
     return { word: w, type, part: TASK[type] ? TASK[type].part : null, reason: it.reason || null, extra: !!it.extra, check: !!it.check,
       sent: pick ? S[pick[0]] : null, sense: pick ? pick[1] : (type === 'meaningToWord' ? nextMeaning(w) : -1), started: Date.now(), done: false };
   }
@@ -587,7 +603,7 @@
     const during = current && !current.done && current.word === w;
     if (during && v === 'unknown') { idkNow(); log({ k: 'mark', w, v, src: src || 'click' }); return; }   // show the answer, then put it on the list
     const made = log({ k: 'mark', w, v, src: src || 'click' });
-    const label = { easy: 'trivially easy', unknown: "don't know", want: 'want to learn', unwant: 'no longer marked want to learn',
+    const label = { easy: 'trivially easy', unknown: "don't know", want: 'want to learn', nowant: "don't want to learn", unwant: 'want-to-learn mark removed',
       drop: 'will not be shown', undrop: 'will be shown again', clear: 'mark removed' }[v];
     toast(w + ': ' + label + (byWord[w] ? '' : ' (not in the word lists, so it is only noted)'),
       ['easy', 'unknown'].includes(v) ? () => { log({ k: 'undo', ref: made.id }); rebuild(); } : null);
@@ -606,11 +622,15 @@
   // clicking a word shows what it is, and is remembered as not having known it (unless it is the word just asked about)
   function showInfo(w, tok, node) {
     const i = infoOf(w, tok);
+    if (node && node._look) {       // a second click takes the note back; a third click notes it again
+      log({ k: 'undo', ref: node._look }); rebuild(); node._look = null; node.classList.remove('noted');
+      return toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), el('i', { text: '  · no longer noted' })));
+    }
     const noted = !!byWord[w] && !(current && current.word === w);
     const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null });
-    if (noted && node) node.classList.add('noted');
+    if (noted && node) { node.classList.add('noted'); node._look = ev.id; }
     toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), noted ? el('i', { text: '  · noted as not known' }) : ''),
-      noted ? () => { log({ k: 'undo', ref: ev.id }); rebuild(); if (node) node.classList.remove('noted'); } : null);
+      noted ? () => { log({ k: 'undo', ref: ev.id }); rebuild(); if (node) { node.classList.remove('noted'); node._look = null; } } : null);
   }
   function wordMenu(w, tok, x, y, hideInfo) {
     const m = $('wordmenu'), r = K.w[w] || {}, i = infoOf(w, tok);
@@ -618,7 +638,7 @@
     m.replaceChildren(
       el('div', { class: 'head' }, el('b', { class: 'zh', text: w }), hideInfo ? '' : '  ' + i.p + (i.g ? ' — ' + i.g : '')),
       item("Don't know this word", 'unknown'), item('Trivially easy', 'easy'),
-      r.want ? item('Remove “want to learn”', 'unwant') : item('Want to learn', 'want'),
+      r.want > 0 ? item('Remove “want to learn”', 'unwant') : r.want < 0 ? item('Remove “don’t want to learn”', 'unwant') : item('Want to learn', 'want'),
       r.drop ? item('Show this word again', 'undrop') : item("Don't show this word", 'drop'),
       (r.mark ? el('button', { text: 'Remove my mark (' + (r.mark === 'easy' ? 'trivially easy' : "don't know") + ')', onclick: () => { m.hidden = true; unmark(w); } }) : ''));
     m.hidden = false;
@@ -680,11 +700,16 @@
   function sentView(s, opt) {
     opt = opt || {};
     const line = el('div', { class: 'sent' });
-    let gapDone = false;
+    let gapDone = false, pos = 0;
+    const whole = opt.miss ? normZh(s.zh) : '';
     s.t.forEach(t => {
       if (t.k === 'p') { line.append(t.w); return; }
       if (opt.gap && t.w === opt.gap && !gapDone) { gapDone = true; line.append(el('span', { class: 'gap', text: '　' })); return; }
-      line.append(wordEl('span', t.w, t, { class: 'tok' + (t.w === opt.highlight ? ' target' : '') + (t.k === 'n' ? ' name' : ''), text: t.w }));
+      const n = wordEl('span', t.w, t, { class: 'tok' + (t.w === opt.highlight ? ' target' : '') + (t.k === 'n' ? ' name' : '') });
+      const at = opt.miss ? whole.indexOf(t.w, pos) : -1;
+      if (at < 0) n.textContent = t.w;
+      else { [...t.w].forEach((ch, k) => n.append(opt.miss.has(at + k) ? el('ins', { text: ch }) : ch)); pos = at + t.w.length; }
+      line.append(n);
     });
     return line;
   }
@@ -709,27 +734,44 @@
   let sortTouched = false;
   function showSort(batch) {
     current = null; idle = 'sort'; sortTouched = false;
-    const state = {};   // word -> 'easy' | 'unknown'
+    const know = {}, want = {};       // word -> 'easy' | 'unknown';  word -> 1 | -1. The two are kept apart.
+    batch.forEach(w => { if (K.w[w] && K.w[w].want) want[w] = K.w[w].want; });
+    const was = Object.assign({}, want);
+    let pen = 'easy';
+    const draw = (c, w) => {
+      c.className = 'chip zh' + (know[w] ? ' ' + know[w] : '');
+      c.replaceChildren(w, want[w] ? el('sup', { class: want[w] > 0 ? 'want' : 'nowant', text: want[w] > 0 ? '★' : '⊘' }) : '');
+    };
+    const apply = (c, w, p) => {
+      sortTouched = true;
+      if (p === 'easy' || p === 'unknown') { if (know[w] === p) delete know[w]; else know[w] = p; }
+      else { const v = p === 'want' ? 1 : -1; if (want[w] === v) delete want[w]; else want[w] = v; }
+      draw(c, w);
+    };
     const chips = batch.map(w => {
-      const c = el('button', { class: 'chip zh', text: w });
-      const set = v => { sortTouched = true; if (v) state[w] = v; else delete state[w]; c.className = 'chip zh' + (v ? ' ' + v : ''); };
-      c.addEventListener('click', e => {
-        if (e.shiftKey) set(state[w] === 'unknown' ? null : 'unknown');
-        else if (e.ctrlKey || e.metaKey) set(state[w] === 'easy' ? null : 'easy');
-        else set(!state[w] ? 'easy' : state[w] === 'easy' ? 'unknown' : null);
-      });
-      c.addEventListener('contextmenu', e => { e.preventDefault(); set(state[w] === 'unknown' ? null : 'unknown'); });
+      const c = el('button', { class: 'chip zh' });
+      draw(c, w);
+      c.addEventListener('click', e => apply(c, w, e.shiftKey ? 'unknown' : (e.ctrlKey || e.metaKey) ? 'easy' : pen));
+      c.addEventListener('contextmenu', e => { e.preventDefault(); apply(c, w, 'unknown'); });
       return c;
     });
+    const pens = [['easy', '✓ trivially easy', 'know'], ['unknown', "✗ don't know", 'dont'], ['want', '★ want to learn', 'want'], ['nowant', "⊘ don't want", 'nowant']];
+    const bar = el('div', { class: 'under four pens' }, pens.map(p => el('button', { class: p[2] + (p[0] === pen ? ' on' : ''), text: p[1], onclick: e => {
+      pen = p[0]; [...bar.children].forEach(b => b.classList.toggle('on', b === e.currentTarget));
+    } })));
     const go = () => {
-      batch.forEach(w => { if (state[w]) log({ k: 'mark', w, v: state[w], src: 'sort' }); });
+      batch.forEach(w => {
+        if (know[w]) log({ k: 'mark', w, v: know[w], src: 'sort' });
+        if ((want[w] || 0) !== (was[w] || 0)) log({ k: 'mark', w, v: want[w] > 0 ? 'want' : want[w] < 0 ? 'nowant' : 'unwant', src: 'sort' });
+      });
       log({ k: 'sorted', ws: batch });
       advance();
     };
+    const above = batch.some(w => byWord[w].lv > D.level);
     screen('sorting',
-      el('div', { class: 'prompt' }, 'Mark only the extremes and leave the rest. ',
-        el('b', { class: 'easytxt', text: 'One tap: trivially easy.' }), ' ', el('b', { class: 'unktxt', text: "Two taps: don't know at all." }),
-        ' (Also ctrl-click and shift-click.) Unmarked words will be tested.'),
+      el('div', { class: 'prompt', text: 'Pick a mark, then tap the words it fits. Mark only the extremes and leave the rest. ' +
+        (above ? 'These are above level ' + D.level + ': one comes into play only if you mark it don\'t know or want to learn.' : 'Unmarked words will be tested.') }),
+      bar,
       el('div', { class: 'chips' }, chips),
       el('button', { class: 'primary', text: 'Done', onclick: go }));
     onEnter = go;
@@ -738,25 +780,56 @@
   // the words currently being learned, checked, or waiting to be taught: a list to mark
   function showWords() {
     current = null; idle = null;
+    const now = new Date(), pct = v => Math.round(100 * v);
     const all = Object.keys(K.w).filter(w => byWord[w] && !K.w[w].drop);
-    const row = w => {
-      const line = el('div', { class: 'wrow' });
+    const SHOWN = [['m', 'meaning'], ['r', 'recall'], ['u', 'use']];
+    const how = (w, p) => { const part = K.w[w].parts[p]; return !part ? 'not tested yet, a guess' : part.src === 'said' ? 'you said' : part.right + ' right, ' + part.wrong + ' wrong'; };
+    const strip = w => el('span', { class: 'strip' }, el('i', { class: 'at85' }),
+      SHOWN.map(([p, name]) => el('i', { class: 'mk ' + p + (K.w[w].parts[p] ? '' : ' guess'), style: 'left:' + pct(partR(w, p, now)) + '%',
+        title: name + ' ' + pct(partR(w, p, now)) + '% (' + how(w, p) + ')' })));
+    const row = (w, asked) => {
+      const line = el('div', { class: 'wrow', id: 'w-' + w });
       const set = (v, label) => { mark(w, v); line.classList.add('marked'); state.textContent = label; };
       const state = el('span', { class: 'muted small state' });
+      let next = '';
+      if (asked) { const t = chooseTask(w); next = 'next: ' + TASKNAME[t] + ', ' + pct(pRight(w, t, now)) + '% · '; }
       line.append(wordEl('span', w, null, { class: 'h zh', text: w }, null, true),
-        el('span', { class: 'mid' }, el('span', { class: 'pinyin small', text: readings(w) }), el('span', { class: 'muted small', text: byWord[w].short })),
+        el('span', { class: 'mid' }, el('span', null, el('span', { class: 'pinyin small', text: readings(w) + ' ' }), el('span', { class: 'muted small', text: byWord[w].short })),
+          strip(w),
+          el('span', { class: 'muted small nums', text: next + SHOWN.map(([p, name]) => name + ' ' + pct(partR(w, p, now))).join(' · ') })),
         state,
         el('button', { class: 'know', title: 'I know this well', text: '✓', onclick: () => set('easy', 'known') }),
         el('button', { class: 'dont', title: "I don't know this at all", text: '✗', onclick: () => set('unknown', "don't know") }));
       return line;
     };
-    const group = (title, list) => (list.length ? [el('h3', { text: title + ' (' + list.length + ')' }), list.map(row)] : null);
-    const waiting = all.filter(w => status(w) === 'wait').sort((a, b) => (K.w[b].want - K.w[a].want) || ((K.w[a].waitT || 0) - (K.w[b].waitT || 0)) || (rankOf(a) - rankOf(b)));
+    const by = s => all.filter(w => status(w) === s);
+    const waiting = by('wait').sort((a, b) => (K.w[b].want - K.w[a].want) || ((K.w[a].waitT || 0) - (K.w[b].waitT || 0)) || (rankOf(a) - rankOf(b)));
+    const playing = by('learning').sort((a, b) => (K.w[a].lastAns || 0) - (K.w[b].lastAns || 0));        // next up first
+    const slipping = w => ['r', 'u', 'm'].some(p => K.w[w].parts[p] && weakPart(w, p, now));
+    const out = by('resting').concat(by('known'));
+    const due = out.filter(slipping).sort((a, b) => partR(w0(b), 'r', now) - partR(w0(a), 'r', now)), held = out.filter(w => !slipping(w));
+    function w0(w) { return w; }
+    const group = (title, list, asked, cap) => (list.length ? [el('h3', { text: title + ' (' + list.length + ')' }), list.slice(0, cap || 60).map(w => row(w, asked)),
+      list.length > (cap || 60) ? el('div', { class: 'muted small', text: 'and ' + (list.length - (cap || 60)) + ' more' }) : null] : null);
+    // one column a word: how likely you are to type it now. Tall columns are close to leaving play.
+    const cols = (list, cls) => list.map(w => el('i', { class: 'col ' + cls + (K.w[w].parts.r ? '' : ' guess'), style: 'height:' + Math.max(3, pct(partR(w, 'r', now))) + '%',
+      title: w + ': recall ' + pct(partR(w, 'r', now)) + '%', onclick: () => { const n = document.getElementById('w-' + w); if (n) n.scrollIntoView({ behavior: 'smooth', block: 'center' }); } }));
+    const chart = el('div', { class: 'cols' }, el('i', { class: 'at85' }), cols(playing, 'play'), el('i', { class: 'sep' }), cols(due, 'due'), el('i', { class: 'sep' }), cols(held.slice(0, 80), 'held'));
+    const hard = Object.keys(TASK).filter(t => (K.ms[t] || []).length || K.d[t] !== TASK[t].d);
     const parts = [
-      el('div', { class: 'prompt', text: 'The words in play. ✓ if you know a word well, ✗ if you don\'t know it at all; leave the rest.' }),
-      group('In play', all.filter(w => status(w) === 'learning').sort((a, b) => (K.w[b].lastAns || 0) - (K.w[a].lastAns || 0))),
-      group('Waiting to be taught', waiting.slice(0, 60)),
-      waiting.length > 60 ? el('div', { class: 'muted small', text: 'and ' + (waiting.length - 60) + ' more waiting' }) : null,
+      el('div', { class: 'prompt', text: 'What the app goes by when it picks the next question.' }),
+      el('div', { class: 'muted small', text: 'One column a word: its height is the chance you can type the word now. Left to right: in play (next up first), out of play and slipping, out of play and holding. Tap a column to find its row.' }),
+      chart,
+      el('div', { class: 'legend small' }, SHOWN.map(([p, name]) => el('span', null, el('i', { class: 'mk ' + p }), name)), el('span', null, el('i', { class: 'mk m guess' }), 'faint: not tested yet, a guess'),
+        el('span', null, el('i', { class: 'at85 key' }), '85%: below it a part is in doubt and gets asked')),
+      group('In play, next up first', playing, true),
+      group('Waiting to be taught', waiting, false),
+      group('Out of play and slipping: these come back as reviews', due, true),
+      group('Out of play and holding', held, false, 30),
+      hard.length ? [el('h3', { text: 'How hard each kind of question has been for you' }),
+        el('div', { class: 'muted small', text: 'The chance of a right answer on a word you half know. It starts as a guess and moves with your answers.' }),
+        hard.map(t => { const v = pct(TASK[t].g + (1 - TASK[t].g) / (1 + Math.exp(K.d[t]))); return el('div', { class: 'trow small' }, el('span', { text: TASKNAME[t] }),
+          el('span', { class: 'strip' }, el('i', { class: 'bar', style: 'width:' + v + '%' })), el('span', { class: 'muted', text: v + '%' })); })] : null,
       el('button', { class: 'primary', text: 'Back to practice', onclick: advance })];
     screen('words in play', ...parts.flat(Infinity).filter(Boolean));
     onEnter = advance;
@@ -951,7 +1024,7 @@
     const others = Object.values(S).filter(x => x.id !== s.id), pool = [];   // two tiles that do not belong
     for (let i = 0; i < 40 && pool.length < 2; i++) {
       const t = wordToks(others[rand(others.length)]), c = t[rand(t.length)];
-      if (c.k === 'w' && !inSent.has(c.w) && !pool.some(p => p.w === c.w)) pool.push({ id: id++, w: c.w, tok: c });
+      if (c.k === 'w' && !inSent.has(c.w) && !pool.some(p => p.w === c.w) && !(byWord[c.w] && byWord[c.w].lv > D.level)) pool.push({ id: id++, w: c.w, tok: c });
     }
     let bank = shuffle(tiles.concat(pool)), row = [];
     const rowEl = el('div', { class: 'row' }), bankEl = el('div', { class: 'bank' });
@@ -1024,6 +1097,7 @@
     // A miss of the word itself (not pinyin, not tile order): it is left alone for a while, and comes back once.
     // Missed twice in a sitting, it is put aside until later. A pinyin check changes none of this.
     st.sinceRead = task.type === 'read' ? 0 : (st.sinceRead || 0) + 1;
+    st.sinceReading = (st.sinceReading || 0) + 1;
     st.asks = st.asks || {};
     Object.keys(st.asks).forEach(x => { if (Date.now() - st.asks[x].t > SITTING) delete st.asks[x]; });
     st.asks[w] = { n: (st.asks[w] ? st.asks[w].n : 0) + 1, t: st.asks[w] ? st.asks[w].t : Date.now() };
@@ -1044,6 +1118,7 @@
   }
 
   function showResult(task, out) {
+    if (task.type === 'reading') return showReadingResult(task, out);
     const w = task.word, s = task.sent;
     // a question that tests more than one part shows each part's result on its own line
     const lines = out.idk ? null : out.lines;
@@ -1053,11 +1128,13 @@
     const parts = [el('div', { class: 'verdict ' + cls }, label, out.why ? el('span', { class: 'why', text: out.why }) : null,
       lines ? lines.map(l => el('div', { class: 'vline ' + (l.ok === null ? 'unk' : l.ok ? 'ok' : 'bad') },
         el('b', { text: (l.ok === null ? '? ' : l.ok ? '✓ ' : '✗ ') + l.label }), l.note ? ' — ' + l.note : '')) : null)];
+    let miss = null;       // what you typed, in red; then the sentence once, with what yours lacked marked in it
     if (out.diff && s) {
-      const [ya, yb] = diff(out.answer, normZh(s.zh));
-      parts.push(el('div', { class: 'muted small', text: 'You typed' }), ya, el('div', { class: 'muted small', text: 'The sentence' }), yb);
+      const d = diff(out.answer, normZh(s.zh));
+      miss = d[2];
+      parts.push(el('div', { class: 'muted small', text: 'You typed' }), d[0], el('div', { class: 'muted small', text: 'The sentence' }));
     }
-    if (s) parts.push(sentView(s, { highlight: w }), pinyinLine(s), el('div', { class: 'en', text: s.en }), ...phraseLines(s));
+    if (s) parts.push(sentView(s, { highlight: w, miss }), pinyinLine(s), el('div', { class: 'en', text: s.en }), ...phraseLines(s));
     else {       // a question about the word alone still shows it in use
       const want = task.sense >= 0 ? sentsOf(w).filter(x => x[1] === task.sense) : [];
       want.concat(sentsOf(w).filter(x => !want.includes(x))).slice(0, 2).forEach(x => {
@@ -1086,6 +1163,106 @@
     onEnter = goForward;
   }
 
+  // ---------- reading: items from HSK 4 exam papers, marked by the paper's own answer key ----------
+  // Four kinds: c = a gap with a word bank, o = three parts to put in order, p = a short passage with a question,
+  // b = words to build into a sentence. They are not tied to one word: they are there for reading. Every word in them
+  // can be clicked, and that is remembered as for any other word.
+  const R = D.reading || [], GL = D.gloss || {}, READ_EVERY = 4;
+  const KINDS = ['p', 'c', 'p', 'o', 'p', 'b'];        // passages come up most
+  const isZh = w => /[一-鿿]/.test(w);
+  const itemToks = x => (x.t || []).concat(...(x.parts || []));
+  function pickReading() {
+    const now = Date.now(), DAY = 86400000;
+    const ok = x => !K.retired['r:' + x.id];
+    const fresh = R.filter(x => ok(x) && !K.read[x.id]);
+    // done before: a missed one comes back after two days, a right one after two months
+    const again = R.filter(x => ok(x) && K.read[x.id] && now - K.read[x.id].t > (K.read[x.id].last ? 60 : 2) * DAY);
+    st.readTurn = (st.readTurn || 0) + 1;
+    const kind = KINDS[st.readTurn % KINDS.length];
+    const pool = [fresh.filter(x => x.k === kind), again.filter(x => x.k === kind), fresh, again].find(l => l.length);
+    if (!pool) return null;
+    // of twelve taken at random, the one with the fewest words you may not know
+    const hard = x => itemToks(x).filter(w => isZh(w) && (byWord[w] ? ['wait', 'learning', 'untouched', 'beyond'].includes(status(w)) : !!GL[w])).length / (itemToks(x).length || 1);
+    const some = []; for (let i = 0; i < 12; i++) some.push(pool[rand(pool.length)]);
+    return some.sort((a, b) => hard(a) - hard(b))[0];
+  }
+  function readToks(toks, opt) {
+    opt = opt || {};
+    const line = el('div', { class: 'sent rd' + (opt.cls ? ' ' + opt.cls : '') });
+    toks.forEach(w => {
+      if (w === '\n') line.append(el('br'));
+      else if (w === '＿') line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' }));
+      else if (isZh(w)) line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok', text: w }));
+      else line.append(w);
+    });
+    return line;
+  }
+  const PERMS = ['ABC', 'ACB', 'BAC', 'BCA', 'CAB', 'CBA'];
+  function showReading(item) {
+    const task = current = { word: null, type: 'reading', item, started: Date.now(), done: false };
+    const done = (ok, ans) => finishReading(task, { ok, ans });
+    idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
+    const kids = [];
+    if (item.k === 'c' || item.k === 'p') {
+      const answer = i => done(i === item.a, item.o[i]);
+      kids.push(el('div', { class: 'prompt', text: item.k === 'c' ? 'Which word goes in the gap?' : 'Read this, then answer.' }), readToks(item.t),
+        el('div', { class: 'choices' + (item.k === 'c' ? ' two' : '') }, item.o.map((o, i) => el('button', { class: 'choice zh', text: o, onclick: () => answer(i) }))));
+      onDigitNext = answer;
+    } else if (item.k === 'o') {
+      kids.push(el('div', { class: 'prompt', text: 'These three parts make one passage. Which order?' }),
+        item.parts.map((p, i) => el('div', { class: 'part3' }, el('b', { text: 'ABC'[i] }), readToks(p))),
+        el('div', { class: 'choices three' }, PERMS.map(o => el('button', { class: 'choice', text: o, onclick: () => done(o === item.a, o) }))));
+    } else {
+      const picked = [], bank = item.o.map((w, i) => ({ w, i })).sort(() => Math.random() - 0.5);
+      const row = el('div', { class: 'row' }), pool = el('div', { class: 'bank' });
+      const draw = () => {
+        row.replaceChildren(...picked.map(t => el('button', { class: 'tile zh', text: t.w, onclick: () => { picked.splice(picked.indexOf(t), 1); bank.push(t); draw(); } })));
+        pool.replaceChildren(...bank.map(t => el('button', { class: 'tile zh', text: t.w, onclick: () => { bank.splice(bank.indexOf(t), 1); picked.push(t); draw(); } })));
+      };
+      const go = () => { if (bank.length) return; const ans = picked.map(t => t.w).join(''); done(normZh(ans) === normZh(item.a), ans); };
+      draw();
+      kids.push(el('div', { class: 'prompt', text: 'Make one sentence from these.' }), row, pool, el('button', { class: 'primary', text: 'Check', onclick: go }));
+      onEnterNext = go;
+    }
+    screen('reading', ...kids.flat(), idkButton());
+    onEnter = onEnterNext; onDigit = onDigitNext; onEnterNext = onDigitNext = null;
+  }
+  let onEnterNext = null, onDigitNext = null;
+  function finishReading(task, out) {
+    if (task.done) return;
+    task.done = true;
+    const item = task.item;
+    st.counter++; st.sinceReading = 0;
+    log({ k: 'read', rid: item.id, kind: item.k, src: item.src, ok: !!out.ok, ans: out.ans, ms: Date.now() - task.started, idk: !!out.idk });
+    save();
+    hist.push({ task, out }); if (hist.length > 30) hist.shift();
+    viewing = -1;
+    showReadingResult(task, out);
+  }
+  function showReadingResult(task, out) {
+    const item = task.item, paper = (D.papers || {})[item.src] || {};
+    const right = item.k === 'c' || item.k === 'p' ? item.o[item.a] : item.a;
+    const parts = [el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Wrong',
+      !out.ok && !out.idk && item.k === 'b' ? el('span', { class: 'why', text: 'Not the sentence in the paper\'s answer key.' }) : null)];
+    if (!out.ok && !out.idk) parts.push(el('div', { class: 'muted small', text: 'Your answer' }), el('div', { class: 'yours typed', text: out.ans }));
+    if (item.k === 'c') parts.push(readToks(item.t, { fill: right }));
+    else if (item.k === 'p') parts.push(readToks(item.t), el('div', { class: 'yours answer', text: right }));
+    else if (item.k === 'o') parts.push(el('div', { class: 'muted small', text: 'The order is ' + right.split('').join(', ') }),
+      readToks([].concat(...right.split('').map((c, i) => (i ? ['，'] : []).concat(item.parts['ABC'.indexOf(c)]))).concat(['。'])));
+    else parts.push(readToks(item.t));
+    if (item.x) parts.push(el('div', { class: 'small explain' }, item.x, el('div', { class: 'muted', text: 'This explanation comes with the transcription of the paper, not from the paper. It has not been checked.' })));
+    parts.push(el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question ' + item.id.split('-')[1] + (paper.official ? '' : ' (from a mock test said to be based on that paper)') + '. Tap any word for its pinyin and meaning.' }));
+    const flagRow = el('div', { class: 'flags' });
+    ['bad item', 'dull', 'liked this', 'too hard'].forEach(f => {
+      const b = el('button', { text: f, onclick: () => { const on = b.classList.toggle('on'); log({ k: 'flag', rid: item.id, flag: f, on }); } });
+      flagRow.append(b);
+    });
+    const more = el('div', { class: 'feedback', hidden: '' }, flagRow);
+    parts.push(el('button', { class: 'primary', text: 'Next', onclick: goForward }), el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
+    screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '', parts);
+    onEnter = goForward;
+  }
+
   // ---------- back: look again at earlier results of this sitting, then return to where you were ----------
   const hist = [];
   let viewing = -1;        // which earlier result is on screen; -1 = the live screen
@@ -1102,7 +1279,7 @@
     if (viewing >= 0 && viewing < hist.length - 1) { viewing++; return showResult(hist[viewing].task, hist[viewing].out); }
     const t = viewing >= 0 ? resume : null;
     viewing = -1; resume = null;
-    if (t) return showTask(t);
+    if (t) return t.type === 'reading' ? showReading(t.item) : showTask(t);
     advance();
   }
   $('backBtn').addEventListener('click', goBack);
@@ -1116,6 +1293,7 @@
     if (it.done) { current = null; idle = 'done'; return screen('', el('p', { text: 'Nothing left to do right now.' })); }
     if (it.sort) return showSort(it.sort);
     if (it.intro) return showIntro(it.intro);
+    if (it.reading) return showReading(it.reading);
     if (it.start) { log({ k: 'start', w: it.start }); return advance(); }
     showTask(makeTask(it));
   }
@@ -1134,16 +1312,18 @@
   }
   function openMenu() {
     const c = {}; targets.forEach(x => { const s = status(x.w); c[s] = (c[s] || 0) + 1; });
-    const below = words.filter(x => x.lv < D.level && K.w[x.w] && ['wait', 'learning'].includes(status(x.w))).length;
+    const below = words.filter(x => x.lv !== D.level && K.w[x.w] && ['wait', 'learning'].includes(status(x.w))).length;
     const n = k => c[k] || 0;
-    const unsorted = order.filter(x => status(x.w) === 'untouched' && !K.sorted[x.w]).map(x => x.w);
+    // more words to sort: this level first, then the levels above it (those only come into play if you mark them)
+    const more = order.filter(x => status(x.w) === 'untouched' && !K.sorted[x.w]).map(x => x.w)
+      .concat(words.filter(x => x.lv > D.level && status(x.w) === 'beyond' && !K.sorted[x.w]).map(x => x.w));
     const panel = el('div', { class: 'panel' },
       el('button', { class: 'plain', text: 'Close', onclick: () => { $('menu').hidden = true; } }),
       el('h3', { text: 'What the app thinks, level ' + D.level + ' (' + targets.length + ' words)' }),
       el('div', { class: 'small counts' },
         [['marked trivially easy', n('easy')], ['known (typed right on two days)', n('known')], ['typed right today, to be asked again another day', n('resting')], ['in play', n('learning')], ['waiting to be taught', n('wait')],
           ['not looked at yet', n('untouched')], ['not shown', n('drop')]].map(x => el('div', { text: x[1] + '  ' + x[0] })),
-        below ? el('div', { text: below + '  lower-level words you marked or missed' }) : null,
+        below ? el('div', { text: below + '  words of other levels in play (you marked, clicked or missed them)' }) : null,
         el('div', { class: 'muted', text: events.filter(e => e.k === 'ans').length + ' answers recorded' })),
       canSync() ? el('div', { class: 'small muted syncline', text: st.sync.err ? 'Sync is not working: ' + st.sync.err + '. It will try again by itself.'
         : st.sync.last ? 'Synced ' + new Date(st.sync.last).toLocaleString() + ' · ' + (st.sync.devices || 1) + (st.sync.devices > 1 ? ' devices' : ' device')
@@ -1152,10 +1332,10 @@
       el('h3', { text: 'Devices' }),
       el('div', { class: 'small devices' }, [...new Set(events.map(e => e.dev || e.id.split('-')[0]))].map(d => el('div', {
         text: deviceLabel(d) + (d === st.dev ? ', this one' : '') + ': ' + events.filter(e => e.k === 'ans' && (e.dev || e.id.split('-')[0]) === d).length + ' answers' }))),
-      el('button', { class: 'plain', text: 'Words in play: ' + (n('learning') + n('wait') + below) + ' to look through',
+      el('button', { class: 'plain', text: 'Picture of the words in play (' + (n('learning') + n('wait') + below) + ')',
         onclick: () => { $('menu').hidden = true; showWords(); } }),
-      unsorted.length ? el('button', { class: 'plain', text: 'Sort another ' + Math.min(SORT_BATCH, unsorted.length) + ' words now',
-        onclick: () => { $('menu').hidden = true; showSort(unsorted.slice(0, SORT_BATCH)); } }) : null,
+      more.length ? el('button', { class: 'plain', text: 'A list of ' + Math.min(SORT_BATCH, more.length) + ' more words to sort',
+        onclick: () => { $('menu').hidden = true; showSort(more.slice(0, SORT_BATCH)); } }) : null,
       el('h3', { text: 'Data' }),
       el('button', { class: 'plain', text: 'Export everything recorded', onclick: exportData }),
       (window.HANYU && !window.HANYU.local) ? el('button', { class: 'plain', text: 'Forget the token on this device', onclick: () => {
@@ -1169,7 +1349,7 @@
         }
       } }),
       el('h3', { text: 'Where the content comes from' }),
-      el('div', { class: 'small muted', text: 'Words, pinyin and definitions: official 2012 HSK lists as published at hskhsk.com (levels 1 to ' + D.level + '). Sentences: ' +
+      el('div', { class: 'small muted', text: 'Words, pinyin and definitions: official 2012 HSK lists as published at hskhsk.com (levels 1 to ' + (D.dataLevel || D.level) + '; level ' + D.level + ' is the one being worked through). Sentences: ' +
         D.stats.sentences + ' from Tatoeba, written by self-declared native Mandarin speakers and limited to these words (CC BY 2.0 FR). ' +
         'The English on tiles and under words is picked automatically and can be the wrong sense.' }));
     $('menu').replaceChildren(panel);
@@ -1207,9 +1387,11 @@
   window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
     pace, devices: () => devices, mark,
+    // for testing: exam reading items on or off; put one on screen
+    reading: on => { st.noReading = !on; save(); }, read: id => showReading(R.find(x => x.id === id)),
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
-    current: () => current && { word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
+    current: () => current && { rid: current.item ? current.item.id : null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
   window.__app.ready = init().then(() => { window.__app.started = true; });
