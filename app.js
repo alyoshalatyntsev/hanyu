@@ -388,7 +388,9 @@
     const shaky = x => wordToks(S[x[0]]).filter(t => t.w !== w && byWord[t.w] && ['wait', 'learning', 'checking', 'untouched', 'beyond'].includes(status(t.w))).length;
     // a word out of play gets a longer sentence when it has one (more to read); a word in play gets a short one
     const wantLong = !opt.short && r && ['known', 'resting', 'easy'].includes(status(w));
-    const score = x => (wantLong ? (S[x[0]].long ? 0 : 3000) : (S[x[0]].long ? 500 : 0)) + shaky(x) * 1000 + ((r && r.senses[x[1]] ? r.senses[x[1]].right : 0) * 10) + (K.sent[x[0]] ? K.sent[x[0]].seen : 0);
+    // A sentence you have already had counts against it more than a word in it that you may not know: each earlier
+    // showing weighs as much as two and a half such words. (It used to be the other way round, and the same sentences kept coming.)
+    const score = x => (wantLong ? (S[x[0]].long ? 0 : 3000) : (S[x[0]].long ? 500 : 0)) + shaky(x) * 250 + ((r && r.senses[x[1]] ? r.senses[x[1]].right : 0) * 10) + (K.sent[x[0]] ? K.sent[x[0]].seen : 0) * 600;
     const best = Math.min(...c.map(score));
     c = c.filter(x => score(x) === best);
     return c[rand(c.length)];
@@ -714,8 +716,11 @@
     return line;
   }
   // set phrases in a sentence (出问题), from the dictionary: shown under it, since the tiles are the separate words
-  const phraseLines = s => (s.ph || []).map(ph => el('div', { class: 'muted small phrase' }, el('b', { class: 'zh', text: ph.w }), '  ' + ph.p + ' — ' + ph.g));
-  const pinyinLine = s => el('div', { class: 'pinyin small', text: s.t.map(t => t.k === 'p' ? '' : t.p.replace(/ \/ /g, '/')).filter(Boolean).join('  ') });
+  // a grammar point the sentence uses: its structure line and a link to its page (AllSet Learning Chinese Grammar Wiki)
+  const grammarLines = g => (g || []).filter(x => (D.grammar || {})[x[0]]).map(x => { const p = D.grammar[x[0]]; return el('div', { class: 'muted small phrase gram' },
+    el('b', { text: 'Pattern' }), '  ' + (p.s[x[1]] || p.s[0] || '') + '  ', el('a', { href: p.u, target: '_blank', rel: 'noopener', text: p.t }), ' (AllSet Learning Chinese Grammar Wiki)'); });
+  const phraseLines = s => (s.ph || []).map(ph => el('div', { class: 'muted small phrase' }, el('b', { class: 'zh', text: ph.w }), '  ' + ph.p + ' — ' + ph.g)).concat(grammarLines(s.g));
+  const pinyinLine = s => el('div', { class: 'pinyin small', text: s.py || s.t.map(t => t.k === 'p' ? '' : t.p.replace(/ \/ /g, '/')).filter(Boolean).join('  ') });
   const bigWord = (w, hide) => wordEl('div', w, null, { class: 'big', text: w }, null, hide);
   // one click shows the first pinyin letter of the word; it is noted on the answer
   function hintButton(task) {
@@ -1089,7 +1094,7 @@
     const stageBefore = before.stage;
     const pred = {};          // the chance the app gave each part just before this answer
     Object.keys(res).forEach(p => { pred[p] = before.parts[p] ? +retr(before.parts[p], new Date()).toFixed(3) : null; });
-    log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, sense: task.sense,
+    log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, rid: task.item ? task.item.id : undefined, sense: task.sense,
       verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, shown: out.shown, picked: out.picked, typed: out.typed,
       ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint, tapped: task.tapped,
       prior: !before.intro && stageBefore === 'none' && !task.hint,       // "knew it already" only counts without the hint
@@ -1135,6 +1140,7 @@
       parts.push(el('div', { class: 'muted small', text: 'You typed' }), d[0], el('div', { class: 'muted small', text: 'The sentence' }));
     }
     if (s) parts.push(sentView(s, { highlight: w, miss }), pinyinLine(s), el('div', { class: 'en', text: s.en }), ...phraseLines(s));
+    else if (task.item) parts.push(readToks(task.item.t, { blank: task.at, fill: w }), enOf(task.item) ? el('div', { class: 'en small', text: enOf(task.item) }) : null);
     else {       // a question about the word alone still shows it in use
       const want = task.sense >= 0 ? sentsOf(w).filter(x => x[1] === task.sense) : [];
       want.concat(sentsOf(w).filter(x => !want.includes(x))).slice(0, 2).forEach(x => {
@@ -1143,7 +1149,8 @@
     }
     const missed = out.idk || Object.keys(out.res || {}).some(p => p !== 'u' && !out.res[p].ok);
     parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : null).filter(Boolean));
-    if (s) parts.push(el('div', { class: 'src', text: 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
+    if (s) parts.push(el('div', { class: 'src', text: s.src === 'gw' ? 'Sentence: an example from the AllSet Learning Chinese Grammar Wiki (non-commercial use, with attribution).'
+      : 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
     // feedback is one quiet link; it opens the flags and the note
     const flagRow = el('div', { class: 'flags' });
     const names = (s ? ['bad sentence'] : []).concat(['dull', 'liked this'], out.tiles && out.verdict === 'unchecked' ? ['my order may also be right'] : []);
@@ -1167,7 +1174,8 @@
   // Four kinds: c = a gap with a word bank, o = three parts to put in order, p = a short passage with a question,
   // b = words to build into a sentence. They are not tied to one word: they are there for reading. Every word in them
   // can be clicked, and that is remembered as for any other word.
-  const R = D.reading || [], GL = D.gloss || {}, READ_EVERY = 4;
+  const R = D.reading || [], GL = D.gloss || {}, READ_EVERY = 3;
+  let follow = [];        // steps still to come on the passage just read
   const KINDS = ['p', 'c', 'p', 'o', 'p', 'b'];        // passages come up most
   const isZh = w => /[一-鿿]/.test(w);
   const itemToks = x => (x.t || []).concat(...(x.parts || []));
@@ -1181,15 +1189,20 @@
     const kind = KINDS[st.readTurn % KINDS.length];
     const pool = [fresh.filter(x => x.k === kind), again.filter(x => x.k === kind), fresh, again].find(l => l.length);
     if (!pool) return null;
-    // of twelve taken at random, the one with the fewest words you may not know
-    const hard = x => itemToks(x).filter(w => isZh(w) && (byWord[w] ? ['wait', 'learning', 'untouched', 'beyond'].includes(status(w)) : !!GL[w])).length / (itemToks(x).length || 1);
-    const some = []; for (let i = 0; i < 12; i++) some.push(pool[rand(pool.length)]);
-    return some.sort((a, b) => hard(a) - hard(b))[0];
+    // Of thirty taken at random: first the one that holds most words you are working on (up to three count), then the
+    // one with the fewest other words you may not know.
+    const mine = x => Math.min(3, new Set(itemToks(x).filter(w => byWord[w] && ['learning', 'wait'].includes(status(w)))).size);
+    const hard = x => itemToks(x).filter(w => isZh(w) && (byWord[w] ? ['untouched', 'beyond'].includes(status(w)) : !!GL[w])).length / (itemToks(x).length || 1);
+    const some = []; for (let i = 0; i < 30; i++) some.push(pool[rand(pool.length)]);
+    return some.sort((a, b) => (mine(b) - mine(a)) || (hard(a) - hard(b)))[0];
   }
   function readToks(toks, opt) {
     opt = opt || {};
     const line = el('div', { class: 'sent rd' + (opt.cls ? ' ' + opt.cls : '') });
-    toks.forEach(w => {
+    toks.forEach((w, i) => {
+      if (opt.hide && i >= opt.hide[0] && i < opt.hide[1]) { if (i === opt.hide[0]) line.append(el('span', { class: 'gap wide', text: '　　　　' })); return; }
+      if (i === opt.blank) { line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' })); return; }
+      if (opt.mark && i >= opt.mark[0] && i < opt.mark[1] && isZh(w)) { line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok target', text: w })); return; }
       if (w === '\n') line.append(el('br'));
       else if (w === '＿') line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' }));
       else if (isZh(w)) line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok', text: w }));
@@ -1198,14 +1211,66 @@
     return line;
   }
   const PERMS = ['ABC', 'ACB', 'BAC', 'BCA', 'CAB', 'CBA'];
+  // English for an exam item (a model's translation, prepared beforehand; the papers have none). Behind a button
+  // while the question is open, and pressing it is recorded.
+  const enOf = item => (item.k === 'o' ? (item.ep ? item.a.split('').map(c => item.ep[c]).join(' ') : '') : item.en) || '';
+  function englishButton(task, text) {
+    if (!text) return '';
+    const b = el('button', { class: 'hint', text: 'English', onclick: () => { task.en = true; b.replaceWith(el('div', { class: 'en small', text })); } });
+    return b;
+  }
+  // After a passage's own question, up to two more steps on the same passage: type a word of it that you are working
+  // on, then type one of its sentences from memory.
+  function planFollow(item) {
+    follow = [];
+    if (item.k !== 'p') return;
+    const body = item.t.indexOf('\n') > 0 ? item.t.slice(0, item.t.indexOf('\n')) : item.t;
+    const rank = w => ({ learning: 0, wait: 1, resting: 2, known: 3, untouched: 4 })[status(w)];
+    const cands = [...new Set(body.filter(w => byWord[w] && byWord[w].lv === D.level && rank(w) != null && body.indexOf(w) === body.lastIndexOf(w)))].sort((a, b) => rank(a) - rank(b));
+    if (cands.length) follow.push({ step: 'word', item, w: cands[0], at: body.indexOf(cands[0]) });
+    // a sentence of 8 to 24 characters that is not the first one
+    const ends = []; body.forEach((w, i) => { if (/[。！？]/.test(w)) ends.push(i); });
+    const spans = ends.map((e, k) => [k ? ends[k - 1] + 1 : 0, e]).filter((sp, k) => k > 0);
+    const fit = spans.filter(sp => { const n = normZh(body.slice(sp[0], sp[1]).join('')).length; return n >= 8 && n <= 24 && !/[0-9０-９A-Za-z]/.test(body.slice(sp[0], sp[1]).join('')); });
+    if (fit.length) follow.push({ step: 'sentence', item, span: fit[rand(fit.length)] });
+  }
+  function showFollow(f) {
+    const item = f.item;
+    if (f.step === 'word') {
+      const task = current = { word: f.w, type: 'typedGap', part: 'r', reason: null, extra: false, check: false, sent: null, sense: -1, started: Date.now(), done: false, item, at: f.at };
+      const inp = textInput('the missing word, in characters');
+      const go = () => {
+        const v = normZh(inp.value); if (!v) return;
+        const ok = v === f.w;
+        if (!ok && byWord[v] && overlaps(byWord[v], byWord[f.w])) return finish(task, { verdict: 'unchecked', res: {}, answer: v,
+          lines: [{ label: v, ok: null, note: 'has a meaning in common with this one, so it is not counted as wrong. The word wanted here was ' + f.w }] });
+        finish(task, { verdict: ok ? 'right' : 'wrong', res: ok ? { r: T(true), s: T(true) } : { r: T(false) }, answer: v });
+      };
+      idkNow = () => finish(task, { verdict: 'wrong', idk: true, res: { r: T(false) }, answer: '' });
+      screen('reading · step 2', el('div', { class: 'prompt', text: 'The same passage with a word taken out. Type it.' }), readToks(item.t, { blank: f.at }),
+        el('div', { class: 'muted small', text: 'Missing word: ' + byWord[f.w].short }), inp, hintButton(task), el('button', { class: 'primary', text: 'Check', onclick: go }), idkButton());
+      onEnter = go; inp.focus();
+    } else {
+      const task = current = { word: null, type: 'reading', item, step: 'sentence', span: f.span, started: Date.now(), done: false };
+      const want = item.t.slice(f.span[0], f.span[1]).join(''), inp = textInput('the missing sentence');
+      const names = [...new Set(item.t.slice(f.span[0], f.span[1]).filter(w => !byWord[w] && GL[w] && /^[A-Z]/.test(GL[w][0])))];
+      const go = () => { const v = normZh(inp.value); if (!v) return; finishReading(task, { ok: v === normZh(want), ans: v }); };
+      idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
+      screen('reading · last step', el('div', { class: 'prompt', text: 'The same passage with one sentence taken out. Type that sentence from memory.' }), readToks(item.t, { hide: f.span }),
+        inp, names.length ? el('div', { class: 'names' }, names.map(n => el('button', { class: 'chip name', text: n, onclick: () => { inp.value += n; inp.focus(); } }))) : '',
+        el('button', { class: 'primary', text: 'Check', onclick: go }), idkButton());
+      onEnter = go; inp.focus();
+    }
+  }
   function showReading(item) {
     const task = current = { word: null, type: 'reading', item, started: Date.now(), done: false };
+    planFollow(item);
     const done = (ok, ans) => finishReading(task, { ok, ans });
     idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
     const kids = [];
     if (item.k === 'c' || item.k === 'p') {
       const answer = i => done(i === item.a, item.o[i]);
-      kids.push(el('div', { class: 'prompt', text: item.k === 'c' ? 'Which word goes in the gap?' : 'Read this, then answer.' }), readToks(item.t),
+      kids.push(el('div', { class: 'prompt', text: item.k === 'c' ? 'Which word goes in the gap?' : 'Read this, then answer.' }), readToks(item.t), englishButton(task, item.k === 'p' ? enOf(item) : ''),
         el('div', { class: 'choices' + (item.k === 'c' ? ' two' : '') }, item.o.map((o, i) => el('button', { class: 'choice zh', text: o, onclick: () => answer(i) }))));
       onDigitNext = answer;
     } else if (item.k === 'o') {
@@ -1233,7 +1298,7 @@
     task.done = true;
     const item = task.item;
     st.counter++; st.sinceReading = 0;
-    log({ k: 'read', rid: item.id, kind: item.k, src: item.src, ok: !!out.ok, ans: out.ans, ms: Date.now() - task.started, idk: !!out.idk });
+    log({ k: 'read', rid: item.id, kind: item.k, src: item.src, step: task.step || null, ok: !!out.ok, ans: out.ans, ms: Date.now() - task.started, idk: !!out.idk, en: !!task.en });
     save();
     hist.push({ task, out }); if (hist.length > 30) hist.shift();
     viewing = -1;
@@ -1241,6 +1306,18 @@
   }
   function showReadingResult(task, out) {
     const item = task.item, paper = (D.papers || {})[item.src] || {};
+    if (task.step === 'sentence') {        // the sentence typed from memory: the same, or shown against the passage's own
+      const want = item.t.slice(task.span[0], task.span[1]).join('');
+      const d = out.ok || out.idk ? null : diff(out.ans, normZh(want));
+      screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
+        el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'unchecked') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Not checked',
+          d ? el('span', { class: 'why', text: 'Not the passage\'s own sentence. Yours may also be good Chinese; the app cannot tell.' }) : null),
+        d ? [el('div', { class: 'muted small', text: 'You typed' }), d[0]] : [], readToks(item.t, { mark: task.span }), enOf(item) ? el('div', { class: 'en small', text: enOf(item) }) : '',
+        el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question ' + item.id.split('-')[1] + '.' }),
+        el('button', { class: 'primary', text: 'Next', onclick: goForward }));
+      onEnter = goForward;
+      return;
+    }
     const right = item.k === 'c' || item.k === 'p' ? item.o[item.a] : item.a;
     const parts = [el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Wrong',
       !out.ok && !out.idk && item.k === 'b' ? el('span', { class: 'why', text: 'Not the sentence in the paper\'s answer key.' }) : null)];
@@ -1250,6 +1327,9 @@
     else if (item.k === 'o') parts.push(el('div', { class: 'muted small', text: 'The order is ' + right.split('').join(', ') }),
       readToks([].concat(...right.split('').map((c, i) => (i ? ['，'] : []).concat(item.parts['ABC'.indexOf(c)]))).concat(['。'])));
     else parts.push(readToks(item.t));
+    if (enOf(item)) parts.push(el('div', { class: 'en small', text: enOf(item) }), item.k === 'p' && item.eo ? el('div', { class: 'small muted', text: 'Answer: ' + item.eo[item.a] }) : null,
+      el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }));
+    parts.push(...grammarLines(item.g));
     if (item.x) parts.push(el('div', { class: 'small explain' }, item.x, el('div', { class: 'muted', text: 'This explanation comes with the transcription of the paper, not from the paper. It has not been checked.' })));
     parts.push(el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question ' + item.id.split('-')[1] + (paper.official ? '' : ' (from a mock test said to be based on that paper)') + '. Tap any word for its pinyin and meaning.' }));
     const flagRow = el('div', { class: 'flags' });
@@ -1279,7 +1359,8 @@
     if (viewing >= 0 && viewing < hist.length - 1) { viewing++; return showResult(hist[viewing].task, hist[viewing].out); }
     const t = viewing >= 0 ? resume : null;
     viewing = -1; resume = null;
-    if (t) return t.type === 'reading' ? showReading(t.item) : showTask(t);
+    if (t && t.item) return t.step === 'sentence' ? showFollow({ step: 'sentence', item: t.item, span: t.span }) : t.type === 'reading' ? showReading(t.item) : showFollow({ step: 'word', item: t.item, w: t.word, at: t.at });
+    if (t) return showTask(t);
     advance();
   }
   $('backBtn').addEventListener('click', goBack);
@@ -1287,6 +1368,7 @@
   function advance() {
     $('wordmenu').hidden = true;
     idkNow = () => {};
+    if (follow.length) { idle = null; return showFollow(follow.shift()); }
     const it = nextItem();
     save();
     idle = null;
@@ -1350,7 +1432,8 @@
       } }),
       el('h3', { text: 'Where the content comes from' }),
       el('div', { class: 'small muted', text: 'Words, pinyin and definitions: official 2012 HSK lists as published at hskhsk.com (levels 1 to ' + (D.dataLevel || D.level) + '; level ' + D.level + ' is the one being worked through). Sentences: ' +
-        D.stats.sentences + ' from Tatoeba, written by self-declared native Mandarin speakers and limited to these words (CC BY 2.0 FR). ' +
+        D.stats.sentences + ', most from Tatoeba, written by self-declared native Mandarin speakers and limited to these words (CC BY 2.0 FR), ' + (D.stats.fromGrammarWiki || 0) +
+        ' from the examples of the AllSet Learning Chinese Grammar Wiki, which is also where the pattern notes come from. Reading items: HSK 4 exam papers, with English by a model. ' +
         'The English on tiles and under words is picked automatically and can be the wrong sense.' }));
     $('menu').replaceChildren(panel);
     $('menu').hidden = false;
@@ -1388,10 +1471,10 @@
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
     pace, devices: () => devices, mark,
     // for testing: exam reading items on or off; put one on screen
-    reading: on => { st.noReading = !on; save(); }, read: id => showReading(R.find(x => x.id === id)),
+    reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.find(x => x.id === id)),
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
-    current: () => current && { rid: current.item ? current.item.id : null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
+    current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
   window.__app.ready = init().then(() => { window.__app.started = true; });

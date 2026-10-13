@@ -169,6 +169,8 @@ main h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0
 .trow { display: grid; grid-template-columns: 9.5em 1fr 3em; gap: 8px; align-items: center; padding: 3px 0; }
 /* reading items from exam papers */
 .sent.rd { font-size: 22px; line-height: 1.75; }
+.sent .gap.wide { min-width: 6em; }
+.en.small { font-size: 15px; color: var(--muted); margin: 6px 0 10px; white-space: pre-line; }
 .sent .tok.filled { border-bottom: 2px solid var(--accent); }
 .part3 { display: grid; grid-template-columns: 1.4em 1fr; align-items: baseline; border-top: 1px solid var(--line); padding: 2px 0; }
 .part3 b { color: var(--muted); font-size: 15px; }
@@ -200,4 +202,5 @@ header #status { flex: 1; text-align: center; }
 button.hint.fb { margin: 10px auto 0; }
 .feedback .flags { margin-top: 6px; }
 .phrase { margin: -8px 0 12px; }
+.phrase.gram a { color: var(--accent); }
 .phrase b { color: var(--fg); font-weight: 500; font-size: 16px; }
