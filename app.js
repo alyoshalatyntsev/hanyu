@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 22;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 23;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -239,6 +239,7 @@
   }
   // lists you gave me, built into the data file: applied once, as marks
   function applyImports() {
+    if (localStorage.getItem('hanyu-test-noimport')) return;       // the tests start from nothing
     (D.marks || []).forEach(m => { const id = m.v + ':' + m.w; if (!K.imported[id]) log({ k: 'mark', w: m.w, v: m.v, src: 'import', id }); });
   }
 
@@ -502,8 +503,11 @@
     if (R.length && !st.noReading && (st.sinceReading || 0) >= READ_EVERY - 1) { const item = pickReading(); if (item) return { reading: item }; }
     // a word you marked "want to learn" that has not come up yet (a level 1-3 word would otherwise be assumed known):
     // it does not wait behind reviews, but takes at most one question in three
-    const wanted = Object.keys(K.w).filter(w => K.w[w].want > 0 && byWord[w] && ['assumed', 'beyond'].includes(status(w)) && free(w));
-    if (wanted.length && st.counter % 3 === 0) return { w: wanted[0], reason: 'findout' };
+    // A few such words come in ahead of reviews, one question in three. A long list (imported from your homework) comes
+    // in as new words instead, every other new word, so that it does not crowd out everything else.
+    const wanted = Object.keys(K.w).filter(w => K.w[w].want > 0 && byWord[w] && ['assumed', 'beyond'].includes(status(w)) && free(w))
+      .sort((a, b) => (byWord[a].lv - byWord[b].lv) || (byWord[a].i - byWord[b].i));
+    if (wanted.length && wanted.length <= 3 && st.counter % 3 === 0) return { w: wanted[0], reason: 'findout' };
     // 2. a word out of play whose recall, use or meaning is slipping; the one most likely still remembered first
     const due = [];
     Object.keys(K.w).forEach(w => {
@@ -540,6 +544,7 @@
     const newOne = force => {
       if (!room && !force) return null;
       if (findQ.length && waitQ.length < 20 && !K.sorted[findQ[0]]) return { sort: findQ.filter(w => !K.sorted[w]).slice(0, SORT_BATCH) };
+      if (wanted.length > 3 && (st.wantTurn = (st.wantTurn || 0) + 1) % 2) return { w: wanted[0], reason: 'findout' };
       st.turn++;
       if (waitQ.length && (st.turn % 3 === 0 || !findQ.length || waitQ.length >= 20)) return { intro: waitQ[0] };
       if (findQ.length) return { w: findQ[0], reason: 'findout' };
@@ -1484,7 +1489,7 @@
   }
   window.__app = { state: () => st, picture: () => K, status, rebuild, advance, sync, events: () => events,
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
-    pace, devices: () => devices, mark,
+    pace, devices: () => devices, mark, imports: () => applyImports(),
     // for testing: exam reading items on or off; put one on screen
     reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.find(x => x.id === id)),
     // for testing: put one particular question on screen
