@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 31;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 34;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -105,15 +105,16 @@
   // The scheduler counts days by the UTC calendar. Times are shifted so that its day turns over at 4 am local time
   // (tz = minutes behind UTC where the event happened; older events have none and are taken as China time).
   const schedTime = (iso, tz) => new Date(+new Date(iso) - ((tz == null ? -480 : tz) + 240) * 60000);
-  function apply(ev) {
+  function apply(ev) {      // (an answer marked "basically right" is replayed as a right one)
     const time = schedTime(ev.t, ev.tz);
     if (ev.k === 'reset') { K = blank(); return; }       // start again from nothing; what came before stays in the record
     if (ev.k === 'device') { devices[ev.dev || ev.id.split('-')[0]] = ev.info; return; }
     if (ev.k === 'sorted') { ev.ws.forEach(w => { K.sorted[w] = true; }); return; }
     if (ev.k === 'read') {         // an exam item: only whether it has been done, how it went and when
       const x = K.read[ev.rid] || (K.read[ev.rid] = { n: 0, right: 0, wrong: 0 });
-      x.n++; if (ev.ok) x.right++; else x.wrong++;
-      x.last = !!ev.ok; x.t = +new Date(ev.t);
+      const ok = ev.ok || okayRefs.has(ev.id);      // ("I was right" counts too)
+      x.n++; if (ok) x.right++; else x.wrong++;
+      x.last = !!ok; x.t = +new Date(ev.t);
       return;
     }
     if (ev.k === 'flag' && ev.rid) { if (ev.flag === 'bad item') { if (ev.on) K.retired['r:' + ev.rid] = true; else delete K.retired['r:' + ev.rid]; } return; }
@@ -155,6 +156,8 @@
       return;
     }
     if (ev.k !== 'ans') return;
+    const okay = okayRefs.get(ev.id);      // "Basically right": counted as the right answer it would have been
+    if (okay) ev = Object.assign({}, ev, { res: okay.res, verdict: 'right', sres: ev.sid ? 'good' : ev.sres });
     const res = ev.res || {};
     K.nAns++;
     // slow for you: more than three times your usual time for this kind of question (and not a long pause away from it)
@@ -227,11 +230,12 @@
     if (ev.part) r.cyc[ev.part] = (r.cyc[ev.part] || 0) + 1;     // how many times each kind of step has been done, to rotate tasks
   }
   let devices = {};      // device name -> what kind of device it said it was
-  let hardRefs = new Set();
+  let hardRefs = new Set(), okayRefs = new Map();
   function rebuild() {
     K = blank(); devices = {};
     const undone = new Set(events.filter(e => e.k === 'undo').map(e => e.ref));
     hardRefs = new Set(events.filter(e => e.k === 'hard' && !undone.has(e.id)).map(e => e.ref));      // right answers you said were hard
+    okayRefs = new Map(events.filter(e => e.k === 'okay' && !undone.has(e.id)).map(e => [e.ref, e]));     // answers you said were basically right
     events.forEach(e => { if (!undone.has(e.id)) apply(e); });
   }
   function log(ev) {
@@ -811,7 +815,8 @@
     el('div', { class: 'under2' },
       el('button', { class: 'qlink', title: 'Simple questions for the next half hour', text: '‹ simpler', onclick: () => nudgeEase(1) }),
       el('button', { class: 'qlink', title: 'Complex questions and more reading for the next half hour', text: 'more complex ›', onclick: () => nudgeEase(-1) })),
-    el('div', { class: 'under one vocabbar' }, el('button', { class: 'vocabbtn', text: 'Vocab test', onclick: () => showVocab() }))];
+    el('div', { class: 'under two vocabbar' }, el('button', { class: 'vocabbtn', text: 'Vocab test', onclick: () => showVocab() }),
+      el('button', { class: 'addbtn', text: '+ word to learn', onclick: () => showAddWord() }))];
 
   let sortTouched = false;
   function showSort(batch) {
@@ -857,6 +862,30 @@
       el('div', { class: 'chips' }, chips),
       el('button', { class: 'primary', text: 'Done', onclick: go }));
     onEnter = go;
+  }
+
+  // ---------- "+": type a word you want to learn ----------
+  // A word of the HSK lists, or one the app has a dictionary entry for, is marked want to learn and comes in soon.
+  // Anything else is recorded as asked for, so it can be added to the data later.
+  function showAddWord() {
+    const back = current && !current.done ? current : null;
+    const inp = textInput('the word, in characters'), list = el('div', { class: 'small addlist' });
+    const add = () => {
+      const w = normZh(inp.value); if (!w) return;
+      if (!byWord[w]) addExtra(w, extraInfo(w));
+      if (byWord[w]) {
+        log({ k: 'mark', w, v: 'want', src: 'added' });
+        list.prepend(el('div', null, el('b', { class: 'zh', text: w }), '  ' + readings(w) + '  ' + byWord[w].short + '  · want to learn'));
+      } else {
+        log({ k: 'ask', w });
+        list.prepend(el('div', null, el('b', { class: 'zh', text: w }), '  · not in the word lists or the dictionary the app has; noted, to add later'));
+      }
+      inp.value = ''; inp.focus();
+    };
+    screen('add a word', el('div', { class: 'prompt', text: 'Type a word you want to learn and press Add. It comes into practice soon.' }),
+      inp, el('button', { class: 'primary', text: 'Add', onclick: add }), list,
+      el('button', { class: 'vlink', text: 'Back to practice', onclick: () => (back ? showTask(back) : advance()) }));
+    onEnter = add; inp.focus();
   }
 
   // ---------- vocab test: a table of words, half shown in Chinese (write the English), half in English (write the word) ----------
@@ -1018,6 +1047,11 @@
   }
 
   // ctx: 'missed' offers "I didn't know this at all"; 'right' offers "Trivially easy"; nothing else to press
+  function missedOffers(w, r, ansEv, ctx) {
+    const kids = [okayButton([ansEv]),
+      ctx === 'missed' && r.mark !== 'unknown' ? (() => { const b = el('button', { class: 'dont', text: "✗ I didn't know this at all", onclick: () => { mark(w, 'unknown'); b.disabled = true; b.textContent = 'Noted'; } }); return b; })() : null].filter(Boolean);
+    return kids.length ? el('div', { class: 'under ' + (kids.length === 2 ? 'two' : 'one') }, kids) : null;
+  }
   function wordCard(w, ctx, ansEv) {
     const word = byWord[w], r = K.w[w] || { parts: {} }, now = new Date();
     const one = p => {
@@ -1034,10 +1068,29 @@
       wordEl('span', w, null, { class: 'h', text: w }), el('span', { class: 'pinyin', text: readings(w) }),
       defView(word, 'def'),
       el('div', { class: 'parts' }, Object.keys(PARTS).map(one))),
-      ctx === 'missed' && r.mark !== 'unknown' ? offer("✗ I didn't know this at all", 'unknown', 'dont') : null,
+      ctx === 'missed' || ctx === 'unchecked' ? missedOffers(w, r, ansEv, ctx) : null,
       ctx === 'right' ? rightOffers(w, r, ansEv) : null];
   }
   // after a right answer: "Trivially easy", and "Hard" (right, but it took effort: held less firmly than a plain right)
+  // after a typed answer marked wrong or not checked: "Basically right" (counted as right; tap again to undo)
+  const RIGHT_RES = { retype: () => ({ u: T(true) }), typeBack: () => ({ r: T(true), s: T(true) }), typedGap: () => ({ r: T(true), s: T(true) }),
+    tilesType: () => ({ r: T(true), s: T(true) }), meaningToWord: () => ({ r: T(true), s: T(true) }), gap: () => ({ m: T(true, 'choice') }), tiles: () => ({ u: T(true) }),
+    vocabMean: () => ({ m: T(true) }), vocabWord: () => ({ r: T(true), s: T(true), m: T(true, 'implied') }) };
+  // "I was right": for any answer the app marked wrong or could not check (your sentence was also good Chinese, your
+  // order also works). The answers it covers are counted as right from then on; tap again to undo.
+  function okayButton(evs) {
+    evs = (evs || []).filter(e => e && !e.idk && (e.k === 'read' || RIGHT_RES[e.type]));
+    if (!evs.length) return null;
+    let oks = events.filter(e => e.k === 'okay' && evs.some(a => a.id === e.ref) && !events.some(u => u.k === 'undo' && u.ref === e.id));
+    const b = el('button', { class: 'know', text: oks.length ? 'Counted as right (tap to undo)' : '✓ I was right' });
+    b.addEventListener('click', () => {
+      if (oks.length) { oks.forEach(o => log({ k: 'undo', ref: o.id })); oks = []; b.textContent = '✓ I was right'; }
+      else { oks = evs.map(a => log({ k: 'okay', ref: a.id, w: a.w, ...(a.k === 'ans' ? { res: RIGHT_RES[a.type]() } : {}) })); b.textContent = 'Counted as right (tap to undo)'; }
+      rebuild();
+    });
+    return b;
+  }
+  const okayBar = evs => { const b = okayButton(evs); return b ? el('div', { class: 'under one' }, b) : null; };
   function rightOffers(w, r, ansEv) {
     const easy = r.mark !== 'easy' ? el('button', { class: 'know', text: '✓ Trivially easy', onclick: () => { mark(w, 'easy'); easy.disabled = true; easy.textContent = 'Noted'; } }) : null;
     let hardEv = ansEv && events.find(e => e.k === 'hard' && e.ref === ansEv.id);
@@ -1312,6 +1365,14 @@
     showResult(task, out);
   }
 
+  // a feedback note is saved when you leave the box, press Enter in it, or press Next (on a phone the box can vanish
+  // before it would otherwise be saved)
+  function noteSaver(note, about) {
+    let saved = '';
+    const flush = () => { const v = note.value.trim(); if (v && v !== saved) { saved = v; log(Object.assign({ k: 'note', note: v }, about())); toast('Note saved'); } };
+    note.addEventListener('change', flush);
+    return flush;
+  }
   function showResult(task, out) {
     if (task.type === 'reading') return showReadingResult(task, out);
     const w = task.word, s = task.sent;
@@ -1338,7 +1399,7 @@
       });
     }
     const missed = out.idk || Object.keys(out.res || {}).some(p => p !== 'u' && !out.res[p].ok);
-    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : null, out.ev).filter(Boolean));
+    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : out.verdict === 'unchecked' ? 'unchecked' : null, out.ev).filter(Boolean));
     if (s) parts.push(el('div', { class: 'src', text: s.src === 'gw' ? 'Sentence: an example from the AllSet Learning Chinese Grammar Wiki (non-commercial use, with attribution).'
       : s.src === 'ted' ? 'Sentence: a subtitle line from a TED talk, with the English line it translates (OPUS TED2020; TED talks are CC BY-NC-ND). The pair was checked by a model, not by a person.'
       : 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
@@ -1353,12 +1414,13 @@
       flagRow.append(b);
     });
     const note = el('input', { type: 'text', placeholder: 'note (optional)' });
-    note.addEventListener('change', () => { if (note.value.trim()) log({ k: 'note', w, note: note.value.trim(), sid: s ? s.id : null, type: task.type }); });
+    const flush = noteSaver(note, () => ({ w, sid: s ? s.id : null, type: task.type, ans: out.answer }));
     const more = el('div', { class: 'feedback', hidden: '' }, flagRow, el('div', { class: 'note' }, note));
     const link = el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } });
-    parts.push(el('button', { class: 'primary', text: 'Next', onclick: goForward }), link, more);
+    const next = () => { flush(); goForward(); };
+    parts.push(el('button', { class: 'primary', text: 'Next', onclick: next }), link, more);
     screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '', parts);
-    onEnter = goForward;
+    onEnter = () => { if (document.activeElement === note) flush(); else next(); };
   }
 
   // ---------- reading: items from HSK 4 exam papers, marked by the paper's own answer key ----------
@@ -1409,6 +1471,18 @@
     return line;
   }
   const PERMS = ['ABC', 'ACB', 'BAC', 'BCA', 'CAB', 'CBA'];
+  // Chinese text that came without word breaks (the options of a question): split into the longest words the app knows,
+  // so that every word in an answer can be tapped and marked too
+  function zhToks(text) {
+    const out = [];
+    for (let i = 0; i < text.length;) {
+      let n = Math.min(4, text.length - i);
+      while (n > 1 && !byWord[text.slice(i, i + n)] && !GL[text.slice(i, i + n)]) n--;
+      out.push(text.slice(i, i + n)); i += n;
+    }
+    return out;
+  }
+  const answerLine = (text, cls) => readToks(zhToks(text), { cls: 'answerline ' + (cls || '') });
   // English for an exam item (a model's translation, prepared beforehand; the papers have none). Behind a button
   // while the question is open, and pressing it is recorded.
   const enOf = item => (item.k === 'o' ? (item.ep ? item.a.split('').map(c => item.ep[c]).join(' ') : '') : item.en) || '';
@@ -1446,7 +1520,7 @@
     const ends = []; body.forEach((w, i) => { if (/[。！？]/.test(w)) ends.push(i); });
     const spans = ends.map((e, k) => [k ? ends[k - 1] + 1 : 0, e]).filter((sp, k) => k > 0);
     const fit = spans.filter(sp => { const n = normZh(body.slice(sp[0], sp[1]).join('')).length; return n >= 8 && n <= 24 && !/[0-9０-９A-Za-z]/.test(body.slice(sp[0], sp[1]).join('')); });
-    if (fit.length && ease() <= 0) follow.push({ step: 'sentence', item, span: fit[rand(fit.length)] });
+    // (A step that hid one sentence to type from memory was taken out on 15 October: the learner reads for meaning, not to memorise.)
   }
   function showFollow(f) {
     const item = f.item;
@@ -1467,14 +1541,14 @@
       };
       const go = () => {
         if (filled.includes(null)) return;
-        const ms = Date.now() - task.started;
+        const ms = Date.now() - task.started, refs = [];
         f.ws.forEach((w, i) => {
           const ok = filled[i] === w, before = rec(w);
-          log({ k: 'ans', w, type: 'gap', part: 'm', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'bank',
-            verdict: ok ? 'right' : 'wrong', res: { m: T(ok, 'choice') }, ans: filled[i], shown: bank, ms, p: +pRight(w, 'gap', new Date()).toFixed(3) });
+          refs.push(log({ k: 'ans', w, type: 'gap', part: 'm', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'bank',
+            verdict: ok ? 'right' : 'wrong', res: { m: T(ok, 'choice') }, ans: filled[i], shown: bank, ms, p: +pRight(w, 'gap', new Date()).toFixed(3) }));
         });
         st.counter += f.ws.length - 1;
-        finishReading(task, { ok: filled.every((w, i) => w === f.ws[i]), ans: filled.join(','), filled: filled.slice() });
+        finishReading(task, { ok: filled.every((w, i) => w === f.ws[i]), ans: filled.join(','), filled: filled.slice(), refs: refs.filter(e => e.verdict !== 'right') });
       };
       idkNow = () => finishReading(task, { ok: false, idk: true, ans: '', filled: f.ws.map(() => '') });
       draw();
@@ -1551,7 +1625,7 @@
       return el('div', { class: 'qblock' }, el('div', { class: 'qline' }, el('b', { text: (parts.qs.length > 1 ? 'Question ' + (qi + 1) + '  ' : '') }), readToks(q.t.slice(q.t.indexOf('\n') + 2))), box);
     });
     const go = () => {
-      const ms = Date.now() - task.started, out = { filled: filled.slice(), typed: inp ? normZh(inp.value) : '', chosen: chosen.slice() };
+      const ms = Date.now() - task.started, out = { filled: filled.slice(), typed: inp ? normZh(inp.value) : '', chosen: chosen.slice(), refs: [] };
       ws.forEach((w, i) => {
         const ok = filled[i] === w, before = rec(w);
         log({ k: 'ans', w, type: 'gap', part: 'm', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'bank',
@@ -1564,7 +1638,7 @@
         log({ k: 'ans', w: parts.tw, type: 'typedGap', part: 'r', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'typed',
           verdict: out.typedMark, res: ok ? { r: T(true), s: T(true), m: T(true, 'implied') } : near ? {} : { r: T(false) }, ans: v, ms, hint: !!hintTask.hint, p: +pRight(parts.tw, 'typedGap', new Date()).toFixed(3) });
       }
-      parts.qs.forEach((q, qi) => log({ k: 'read', rid: q.id, kind: 'p', src: q.src, step: qi ? 'more' : null, ok: chosen[qi] === q.a, ans: chosen[qi] == null ? '' : q.o[chosen[qi]], ms, idk: chosen[qi] == null, en: !!task.en }));
+      parts.qs.forEach((q, qi) => { const e = log({ k: 'read', rid: q.id, kind: 'p', src: q.src, step: qi ? 'more' : null, ok: chosen[qi] === q.a, ans: chosen[qi] == null ? '' : q.o[chosen[qi]], ms, idk: chosen[qi] == null, en: !!task.en }); if (!e.ok) out.refs.push(e); });
       task.done = true; st.counter += ws.length + (parts.tw ? 1 : 0) + parts.qs.length; st.sinceReading = 0;
       planFollow(item, true); save();
       hist.push({ task, out }); if (hist.length > 30) hist.shift();
@@ -1594,12 +1668,13 @@
       enOf(item) ? el('div', { class: 'en small', text: enOf(item).split('\n★')[0] }) : '',
       parts.qs.map((q, qi) => el('div', { class: 'qblock' },
         el('div', { class: 'qline' }, readToks(q.t.slice(q.t.indexOf('\n') + 2))),
-        el('div', { class: 'vline ' + (out.chosen[qi] === q.a ? 'ok' : 'bad') }, el('b', { text: (out.chosen[qi] === q.a ? '✓ ' : '✗ ') + q.o[q.a] }),
-          out.chosen[qi] != null && out.chosen[qi] !== q.a ? ' — you chose ' + q.o[out.chosen[qi]] : out.chosen[qi] == null ? ' — not answered' : '',
+        el('div', { class: 'vline ' + (out.chosen[qi] === q.a ? 'ok' : 'bad') }, el('b', { text: out.chosen[qi] === q.a ? '✓ ' : '✗ ' }), answerLine(q.o[q.a]),
+          out.chosen[qi] != null && out.chosen[qi] !== q.a ? [' you chose ', answerLine(q.o[out.chosen[qi]])] : out.chosen[qi] == null ? ' not answered' : '',
           q.eo ? el('span', { class: 'muted small', text: '  (' + q.eo[q.a] + ')' }) : null))),
       ws.length || parts.tw ? el('div', { class: 'small also' }, ws.concat(parts.tw ? [parts.tw] : []).flatMap((w, i) => [i ? ' · ' : '', el('b', { class: 'zh', text: w }), ' ' + readings(w) + ' ' + byWord[w].short])) : '',
       ...grammarLines(item.g),
       el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }),
+      n < marks.length ? okayBar(out.refs) : null,
       el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question' + (parts.qs.length > 1 ? 's ' : ' ') + parts.qs.map(q => q.id.split('-')[1]).join(' and ') + '.' }),
       el('button', { class: 'primary', text: 'Next', onclick: goForward }));
     onEnter = goForward;
@@ -1617,9 +1692,26 @@
         el('div', { class: 'choices' + (item.k === 'c' ? ' two' : '') }, item.o.map((o, i) => el('button', { class: 'choice zh', text: o, onclick: () => answer(i) }))));
       onDigitNext = answer;
     } else if (item.k === 'o') {
-      kids.push(el('div', { class: 'prompt', text: 'These three parts make one passage. Which order?' }),
-        item.parts.map((p, i) => el('div', { class: 'part3' }, el('b', { text: 'ABC'[i] }), readToks(p))),
-        el('div', { class: 'choices three' }, PERMS.map(o => el('button', { class: 'choice', text: o, onclick: () => done(o === item.a, o) }))));
+      // The order alone can often be guessed from the shape of the parts ("大家都知道" comes first). So, where the English
+      // of the parts is there, each English line is also matched to its part: that needs the Chinese understood.
+      let order = null;
+      const match = {}, eng = item.ep ? shuffle(['A', 'B', 'C']) : [];
+      const permBox = el('div', { class: 'choices three' }, PERMS.map(o => el('button', { class: 'choice', text: o, onclick: e => {
+        order = o; [...permBox.children].forEach(b => b.classList.toggle('picked', b === e.currentTarget)); } })));
+      const matchRows = eng.map(c => {
+        const row = el('div', { class: 'matchbtns' }, ['A', 'B', 'C'].map(x => el('button', { class: 'choice', text: x, onclick: e => {
+          match[c] = x; [...row.children].forEach(b => b.classList.toggle('picked', b === e.currentTarget)); } })));
+        return el('div', { class: 'matchrow' }, el('div', { class: 'en small', text: item.ep[c] }), row);
+      });
+      const go = () => {
+        if (!order) return;
+        const matchOk = eng.every(c => match[c] === c);
+        finishReading(task, { ok: order === item.a && matchOk, ans: order + (eng.length ? ' ' + eng.map(c => c + '=' + (match[c] || '-')).join(',') : ''), order, match, orderOk: order === item.a, matchOk, eng });
+      };
+      kids.push(el('div', { class: 'prompt', text: 'These three parts make one passage. Which order?' + (eng.length ? ' And which part does each English line translate?' : '') }),
+        item.parts.map((p, i) => el('div', { class: 'part3' }, el('b', { text: 'ABC'[i] }), readToks(p))), permBox,
+        eng.length ? [el('div', { class: 'small muted', text: 'Which part is this?' }), matchRows] : [], el('button', { class: 'primary', text: 'Check', onclick: go }));
+      onEnterNext = go;
     } else {
       const picked = [], bank = item.o.map((w, i) => ({ w, i })).sort(() => Math.random() - 0.5);
       const row = el('div', { class: 'row' }), pool = el('div', { class: 'bank' });
@@ -1641,7 +1733,7 @@
     task.done = true;
     const item = task.item;
     st.counter++; st.sinceReading = 0;
-    log({ k: 'read', rid: item.id, kind: item.k, src: item.src, step: task.step || null, ok: !!out.ok, ans: out.ans, ms: Date.now() - task.started, idk: !!out.idk, en: !!task.en });
+    out.refs = (out.refs || []).concat([log({ k: 'read', rid: item.id, kind: item.k, src: item.src, step: task.step || null, ok: !!out.ok, ans: out.ans, ms: Date.now() - task.started, idk: !!out.idk, en: !!task.en })]);
     save();
     hist.push({ task, out }); if (hist.length > 30) hist.shift();
     viewing = -1;
@@ -1658,6 +1750,7 @@
           out.filled[gi] && out.filled[gi] !== task.ws[gi] ? el('sup', { text: ' not ' + out.filled[gi] }) : null) }),
         enOf(item) ? el('div', { class: 'en small', text: enOf(item) }) : '',
         el('div', { class: 'small also' }, task.ws.map((w, i) => [i ? ' · ' : '', el('b', { class: 'zh', text: w }), ' ' + readings(w) + ' ' + byWord[w].short]).flat()),
+        !out.ok && !out.idk ? okayBar(out.refs) : null,
         el('button', { class: 'primary', text: 'Next', onclick: goForward }));
       onEnter = goForward;
       return;
@@ -1678,14 +1771,16 @@
     const parts = [el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Wrong',
       !out.ok && !out.idk && item.k === 'b' ? el('span', { class: 'why', text: 'Not the sentence in the paper\'s answer key.' }) : null)];
     if (!out.ok && !out.idk) parts.push(el('div', { class: 'muted small', text: 'Your answer' }), el('div', { class: 'yours typed', text: out.ans }));
-    if (item.k === 'c') parts.push(readToks(item.t, { fill: right }));
-    else if (item.k === 'p') parts.push(readToks(item.t), el('div', { class: 'yours answer', text: right }));
-    else if (item.k === 'o') parts.push(el('div', { class: 'muted small', text: 'The order is ' + right.split('').join(', ') }),
+    if (item.k === 'c') parts.push(readToks(item.t, { fill: right }), el('div', { class: 'small muted', text: 'The words to choose from:' }), answerLine(item.o.join('　')));
+    else if (item.k === 'p') parts.push(readToks(item.t), answerLine(right, 'ok'));
+    else if (item.k === 'o') parts.push(el('div', { class: 'muted small', text: 'The order is ' + right.split('').join(', ') + (out.order && out.order !== item.a ? ' (you chose ' + out.order.split('').join(', ') + ')' : '') +
+        (out.eng && out.eng.length ? '. Matching the English: ' + out.eng.filter(c => out.match[c] === c).length + ' of 3 right' + (out.matchOk ? '' : ' (' + out.eng.map(c => (item.ep[c] || '').slice(0, 24) + '… is ' + c).join('; ') + ')') : '') }),
       readToks([].concat(...right.split('').map((c, i) => (i ? ['，'] : []).concat(item.parts['ABC'.indexOf(c)]))).concat(['。'])));
     else parts.push(readToks(item.t));
     if (enOf(item)) parts.push(el('div', { class: 'en small', text: enOf(item) }), item.k === 'p' && item.eo ? el('div', { class: 'small muted', text: 'Answer: ' + item.eo[item.a] }) : null,
       el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }));
     parts.push(...grammarLines(item.g));
+    if (!out.ok && !out.idk) parts.push(okayBar(out.refs));
     if (item.x) parts.push(el('div', { class: 'small explain' }, item.x, el('div', { class: 'muted', text: 'This explanation comes with the transcription of the paper, not from the paper. It has not been checked.' })));
     parts.push(el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question ' + item.id.split('-')[1] + (paper.official ? '' : ' (from a mock test said to be based on that paper)') + '. Tap any word for its pinyin and meaning.' }));
     const flagRow = el('div', { class: 'flags' });
@@ -1693,8 +1788,10 @@
       const b = el('button', { text: f, onclick: () => { const on = b.classList.toggle('on'); log({ k: 'flag', rid: item.id, flag: f, on }); } });
       flagRow.append(b);
     });
-    const more = el('div', { class: 'feedback', hidden: '' }, flagRow);
-    parts.push(el('button', { class: 'primary', text: 'Next', onclick: goForward }), el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
+    const note = el('input', { type: 'text', placeholder: 'note (optional)' });
+    const flush = noteSaver(note, () => ({ rid: item.id, ans: out.ans }));
+    const more = el('div', { class: 'feedback', hidden: '' }, flagRow, el('div', { class: 'note' }, note));
+    parts.push(el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }), el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
     screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '', parts);
     onEnter = goForward;
   }

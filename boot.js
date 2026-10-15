@@ -82,26 +82,40 @@
     input.focus();
   }
 
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
   async function boot() {
     if (LOCAL) { await script('private/data.js'); return start(window.DATA); }
+    let reg = null;
     if ('serviceWorker' in navigator) {
-      const had = !!navigator.serviceWorker.controller;      // a new release took over: reload once to run it
+      const had = !!navigator.serviceWorker.controller;
       // a new release took over: before the first question, reload at once; once a question is on screen, wait for the next "Next"
       navigator.serviceWorker.addEventListener('controllerchange', () => { if (!had) return; if (window.__app && window.__app.started) window.__reloadWanted = true; else location.reload(); });
-      navigator.serviceWorker.register('sw.js').catch(() => {});
+      reg = navigator.serviceWorker.register('sw.js').catch(() => null);
     }
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return gate();
     const cached = await cacheGet();
     if (cached && cached.data && cached.data.v === DATA_VERSION) {
-      await start(cached.data);
-      // pick up a newer data file for next time; a dead token or no network never blocks practice
-      fetchData(token, cached.etag).then(async got => {
-        if (!got || got.data.v !== DATA_VERSION) return;
-        await cacheSet(got);
-        window.dispatchEvent(new Event('hanyu-newdata'));       // the app loads it at once, or offers to
-      }).catch(() => {});
-      return;
+      // Before the first question: "Connecting…" while the app looks for a newer version of itself and newer words, for
+      // up to four seconds, so that nothing swaps the question once it is on screen. A newer version reloads the page
+      // here (controllerchange above), before any question. No network, or too slow: practice starts from what is on the
+      // device, and anything that arrives later is used at the next "Next".
+      const p = document.createElement('p');
+      p.className = 'muted connecting'; p.textContent = 'Connecting…';
+      main.replaceChildren(p);
+      const dataP = fetchData(token, cached.etag).then(got => (got && got.data.v === DATA_VERSION ? got : null)).catch(() => null);
+      const appP = (async () => {
+        const r = await reg;
+        if (!r) return;
+        try { await r.update(); } catch (e) { return; }
+        const w = r.installing || r.waiting;
+        if (w) await new Promise(res => { w.addEventListener('statechange', () => { if (['activated', 'redundant'].includes(w.state)) res(); }); });
+        await sleep(300);         // let controllerchange reload the page if this was a new version
+      })();
+      const got = await Promise.race([Promise.all([dataP, appP]).then(([g]) => g || null), sleep(4000).then(() => undefined)]);
+      if (got) { await cacheSet(got); return start(got.data); }
+      if (got === undefined) dataP.then(async g => { if (g) { await cacheSet(g); window.dispatchEvent(new Event('hanyu-newdata')); } });
+      return start(cached.data);
     }
     try {
       const got = await fetchData(token);

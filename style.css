@@ -181,6 +181,12 @@ main h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0
 .qblock .qline .sent { font-size: 19px; margin: 2px 0; }
 .choice.picked { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
 .typedline { margin: 10px 0 4px; }
+.matchrow { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; border-top: 1px solid var(--line); padding: 4px 0; }
+.matchbtns { display: flex; gap: 6px; }
+.matchbtns .choice { padding: 8px 12px; text-align: center; }
+.sent.answerline { font-size: 19px; margin: 4px 0; }
+.sent.answerline.ok { color: var(--ok); }
+.vline .sent.answerline { display: inline; }
 .typedline input { margin-top: 4px; }
 .en.small { font-size: 15px; color: var(--muted); margin: 6px 0 10px; white-space: pre-line; }
 .sent .tok.filled { border-bottom: 2px solid var(--accent); }
@@ -215,8 +221,11 @@ button.hint.fb { margin: 10px auto 0; }
 button.vlink { display: block; margin: 12px auto 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 2px 0;
   cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 button.vlink:hover { color: var(--fg); }
+.connecting { text-align: center; margin-top: 30vh; }
 .under.vocabbar { margin-top: 14px; }
-.under button.vocabbtn { color: var(--fg); }
+.under button.vocabbtn, .under button.addbtn { color: var(--fg); }
+.addlist { margin-top: 12px; line-height: 1.9; }
+.addlist .zh { font-size: 18px; }
 .under2 { display: grid; grid-template-columns: 1fr 1.3fr 1fr; align-items: center; margin-top: 4px; }
 .under2 button.vlink { margin: 6px auto 0; }
 button.qlink { border: 0; background: none; font: inherit; font-size: 13px; color: var(--muted); padding: 8px 4px; cursor: pointer; }
