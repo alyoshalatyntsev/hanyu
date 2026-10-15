@@ -131,6 +131,7 @@ button.hint:hover { color: var(--fg); }
 .vline.unk { color: var(--unk); }
 .vline .zh, .vline { font-family: inherit; }
 .sent .tok.noted { border-bottom: 2px solid var(--bad); }
+.sent .tok.wanted { border-bottom: 3px double var(--bad); background: var(--badbg); }
 #toast i { font-style: normal; opacity: .75; }
 .devices div { margin: 1px 0; }
 button.primary { margin-top: 12px; }
@@ -209,6 +210,8 @@ button.hint.fb { margin: 10px auto 0; }
 button.vlink { display: block; margin: 12px auto 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 2px 0;
   cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 button.vlink:hover { color: var(--fg); }
+.under.vocabbar { margin-top: 14px; }
+.under button.vocabbtn { color: var(--fg); }
 .under2 { display: grid; grid-template-columns: 1fr 1.3fr 1fr; align-items: center; margin-top: 4px; }
 .under2 button.vlink { margin: 6px auto 0; }
 button.qlink { border: 0; background: none; font: inherit; font-size: 13px; color: var(--muted); padding: 8px 4px; cursor: pointer; }

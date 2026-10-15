@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 29;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 30;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -145,7 +145,6 @@
     if (ev.k === 'look') {          // you clicked the word to see what it is: counted as not knowing its meaning
       if (!ev.noted || !byWord[ev.w]) return;
       if (r.mark === 'easy') r.mark = null;
-      if (r.stage === 'none') { r.started = true; r.left = false; return; }       // not being learned: it joins the words in play
       const part = r.parts.m || (r.parts.m = { card: F.createEmptyCard(time), right: 0, wrong: 0, src: null });
       part.card = fsrs.next(part.card, time, F.Rating.Again).card; part.wrong++; part.last = false; part.src = 'tested';
       return;
@@ -420,6 +419,7 @@
     const shaky = x => others(x).filter(t => ['untouched', 'beyond'].includes(status(t.w))).length - teach(x);
     // a word out of play gets a longer sentence when it has one (more to read); a word in play gets a short one
     const wantLong = !opt.short && r && (['known', 'resting', 'easy'].includes(status(w)) || ease() < 0) && ease() <= 0;
+    if (ease() > 0 && c.some(x => !S[x[0]].long)) c = c.filter(x => !S[x[0]].long);      // simpler: short sentences only
     // A sentence you have already had counts against it more than a word in it that you may not know: each earlier
     // showing weighs as much as two and a half such words. (It used to be the other way round, and the same sentences kept coming.)
     const score = x => (wantLong ? (S[x[0]].long ? 0 : 3000) : (S[x[0]].long ? 500 : 0)) + shaky(x) * 250 + ((r && r.senses[x[1]] ? r.senses[x[1]].right : 0) * 10) + (K.sent[x[0]] ? K.sent[x[0]].seen : 0) * 600;
@@ -494,9 +494,10 @@
     }
     return st.pace || 0;
   }
-  // simpler / harder: which kind of question, for the next half hour (then it is gone). Up to two steps either way.
-  // Simpler: the app picks questions you are more likely to get right, short sentences, and fewer exam items.
-  // Harder: the reverse, with longer sentences when a word has them and an exam item every other question.
+  // simpler / more complex: what kind of question, for the next half hour (then it is gone). Up to two steps either way.
+  // Not about how likely you are to get it right (that stays as it is). Simpler: short questions about one word (gaps,
+  // typing a word), short sentences, fewer exam items, and a passage with only its own question and one word to type.
+  // More complex: whole sentences, tiles, typing back, longer sentences, an exam item every other question, every step.
   const EASE_MIN = 30;
   function ease() {
     if (st.ease && Date.now() - (st.easeT || 0) > EASE_MIN * 60000) st.ease = 0;
@@ -506,7 +507,7 @@
     st.ease = Math.max(-2, Math.min(2, ease() + d)); st.easeT = Date.now(); save();
     log({ k: 'ease', d, now: st.ease });
     const n = Math.abs(st.ease);
-    toast(st.ease === 0 ? 'Back to the usual questions' : (st.ease > 0 ? 'Simpler' : 'Harder') + ' questions for the next ' + EASE_MIN + ' minutes' + (n > 1 ? ' (two steps)' : ''));
+    toast(st.ease === 0 ? 'Back to the usual mix of questions' : (st.ease > 0 ? 'Simpler' : 'More complex') + ' questions for the next ' + EASE_MIN + ' minutes' + (n > 1 ? ' (two steps)' : ''));
   }
   function nudge(d) {
     pace();
@@ -620,8 +621,9 @@
     const can = [hit && 'gap', short && !tilesLately && 'tiles', short && 'tilesType', hit && 'typedGap', short && 'retype', pickSent(w, { seenOnly: true, short: true }) && 'typeBack'].filter(Boolean);
     return can.length ? can : ['meaningToWord'];       // every sentence of the word has been shown today: ask for the word from its meaning instead
   }
+  const COMPLEX = { gap: 1, read: 1, meaningToWord: 1, typedGap: 2, tilesType: 3, tiles: 3, retype: 4, typeBack: 5 };
   function chooseTask(w) {
-    const now = new Date(), floor = Math.min(0.9, Math.max(0.4, 0.6 - 0.05 * pace() + 0.1 * ease()));
+    const now = new Date(), floor = Math.min(0.8, Math.max(0.5, 0.6 - 0.05 * pace()));
     const twice = t => st.recent.length > 1 && st.recent[0].type === t && st.recent[1].type === t;
     let can = available(w).filter(t => !twice(t));
     if (!can.length) can = available(w);
@@ -630,6 +632,8 @@
     if (!c.length) c = can;
     const ok = c.filter(t => pRight(w, t, now) >= floor);
     const by = (list, sign) => list.slice().sort((a, b) => sign * (pRight(w, a, now) - pRight(w, b, now)))[0];
+    const cx = ease();      // simpler (+) or more complex (-): among the questions likely enough to be got right, the least or the most complex
+    if (cx && ok.length) return ok.slice().sort((a, b) => (cx > 0 ? 1 : -1) * ((COMPLEX[a] || 2) - (COMPLEX[b] || 2)) || (pRight(w, a, now) - pRight(w, b, now)))[0];
     return ok.length ? by(ok, 1) : by(c, -1);
   }
   function typeFor(it) { return it.type || chooseTask(it.w); }
@@ -675,15 +679,21 @@
   // clicking a word shows what it is, and is remembered as not having known it (unless it is the word just asked about)
   function showInfo(w, tok, node) {
     const i = infoOf(w, tok);
-    if (node && node._look) {       // a second click takes the note back; a third click notes it again
-      log({ k: 'undo', ref: node._look }); rebuild(); node._look = null; node.classList.remove('noted');
-      return toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), el('i', { text: '  · no longer noted' })));
+    const head = el('b', { class: 'zh', text: w }), info = '  ' + i.p + (i.g ? ' — ' + i.g : '');
+    if (node && node._want) {       // third click: back to as it was before the first
+      log({ k: 'undo', ref: node._want }); if (node._look) log({ k: 'undo', ref: node._look }); rebuild();
+      node._want = node._look = null; node.classList.remove('noted', 'wanted');
+      return toast(el('span', null, head, info, el('i', { text: '  · cleared' })));
+    }
+    if (node && node._look) {       // second click: also want to learn (it comes in soon)
+      node._want = log({ k: 'mark', w, v: 'want', src: 'click' }).id; node.classList.add('wanted');
+      return toast(el('span', null, head, info, el('i', { text: '  · want to learn. Tap again to clear' })));
     }
     const extra = !byWord[w] && addExtra(w, i);
     const noted = !!byWord[w] && !(current && current.word === w);
     const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null, ...(byWord[w] && byWord[w].extra ? { p: i.p, g: i.g } : {}) });
     if (noted && node) { node.classList.add('noted'); node._look = ev.id; }
-    toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), noted ? el('i', { text: '  · noted as not known' }) : ''),
+    toast(el('span', null, head, info, noted ? el('i', { text: '  · noted as not known. Tap again: want to learn' }) : ''),
       noted ? () => { log({ k: 'undo', ref: ev.id }); rebuild(); if (node) { node.classList.remove('noted'); node._look = null; } } : null);
   }
   function wordMenu(w, tok, x, y, hideInfo) {
@@ -799,9 +809,9 @@
     el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, el('span', { class: 'x', text: '✗' }), el('span', { class: 'lbl', text: "I don't know" })),
     el('button', { class: 'pace faster', title: 'More new words and fewer easy steps for a while', text: 'faster ›', onclick: () => nudge(1) })),
     el('div', { class: 'under2' },
-      el('button', { class: 'qlink', title: 'Easier kinds of question for the next half hour', text: '‹ simpler', onclick: () => nudgeEase(1) }),
-      el('button', { class: 'vlink', text: 'Vocab test', onclick: () => showVocab() }),
-      el('button', { class: 'qlink', title: 'Harder kinds of question and more reading for the next half hour', text: 'harder ›', onclick: () => nudgeEase(-1) }))];
+      el('button', { class: 'qlink', title: 'Simple questions for the next half hour', text: '‹ simpler', onclick: () => nudgeEase(1) }),
+      el('button', { class: 'qlink', title: 'Complex questions and more reading for the next half hour', text: 'more complex ›', onclick: () => nudgeEase(-1) })),
+    el('div', { class: 'under one vocabbar' }, el('button', { class: 'vocabbtn', text: 'Vocab test', onclick: () => showVocab() }))];
 
   let sortTouched = false;
   function showSort(batch) {
@@ -1422,7 +1432,7 @@
     const bank = [];
     for (const w of pool) { if (bank.length < 3 && bank.every(b => Math.abs(body.indexOf(b) - body.indexOf(w)) > 2)) bank.push(w); }
     bank.sort((a, b) => body.indexOf(a) - body.indexOf(b));
-    if (bank.length >= 2) follow.push({ step: 'bank', item, ws: bank, at: bank.map(w => body.indexOf(w)) });
+    if (bank.length >= 2 && ease() <= 0) follow.push({ step: 'bank', item, ws: bank, at: bank.map(w => body.indexOf(w)) });
     const rank = w => ({ learning: 0, wait: 1, resting: 2, known: 3, untouched: 4 })[status(w)];
     const inBank = new Set(bank);
     const cands = [...new Set(body.filter(w => byWord[w] && byWord[w].lv === D.level && rank(w) != null && body.indexOf(w) === body.lastIndexOf(w) && !inBank.has(w)))].sort((a, b) => rank(a) - rank(b));
@@ -1431,7 +1441,7 @@
     const ends = []; body.forEach((w, i) => { if (/[。！？]/.test(w)) ends.push(i); });
     const spans = ends.map((e, k) => [k ? ends[k - 1] + 1 : 0, e]).filter((sp, k) => k > 0);
     const fit = spans.filter(sp => { const n = normZh(body.slice(sp[0], sp[1]).join('')).length; return n >= 8 && n <= 24 && !/[0-9０-９A-Za-z]/.test(body.slice(sp[0], sp[1]).join('')); });
-    if (fit.length) follow.push({ step: 'sentence', item, span: fit[rand(fit.length)] });
+    if (fit.length && ease() <= 0) follow.push({ step: 'sentence', item, span: fit[rand(fit.length)] });
   }
   function showFollow(f) {
     const item = f.item;
