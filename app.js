@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 30;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 31;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -1366,6 +1366,11 @@
   // b = words to build into a sentence. They are not tied to one word: they are there for reading. Every word in them
   // can be clicked, and that is remembered as for any other word.
   const R = D.reading || [], GL = D.gloss || {}, READ_EVERY = 3;
+  // A passage whose question runs straight on from the text ("……支持你。这段话主要谈：") gets a line break and a ★ before it.
+  R.forEach(x => {
+    if (x.k !== 'p' || x.t.includes('\n')) return;
+    for (let i = x.t.length - 2; i > 0; i--) if (/[。！？…]$/.test(x.t[i])) { if (/[：:？?]$/.test(x.t.slice(i + 1).join(''))) x.t = x.t.slice(0, i + 1).concat(['\n', '★ '], x.t.slice(i + 1)); break; }
+  });
   let follow = [];        // steps still to come on the passage just read
   const KINDS = ['p', 'c', 'p', 'o', 'p', 'b'];        // passages come up most
   const isZh = w => /[一-鿿]/.test(w);
@@ -1418,12 +1423,12 @@
   const passageOf = x => { const t = x.t.join('').split('\n★')[0]; const m = t.match(/^([\s\S]*[。！？…”])([^。！？…”]+[：:？?])$/); return (m ? m[1] : t).trim(); };
   const SAME = {};
   R.filter(x => x.k === 'p').forEach(x => { (SAME[passageOf(x)] = SAME[passageOf(x)] || []).push(x); });
-  function planFollow(item) {
+  function planFollow(item, asked) {
     follow = [];
     if (item.k !== 'p') return;
     const body = item.t.indexOf('\n') > 0 ? item.t.slice(0, item.t.indexOf('\n')) : item.t;
-    // 1. the paper's other questions on the same passage
-    (SAME[passageOf(item)] || []).filter(x => x.id !== item.id && !K.retired['r:' + x.id]).forEach(x => follow.push({ step: 'more', item: x }));
+    // 1. the paper's other questions on the same passage (not when they were all asked together on the first screen)
+    if (!asked) (SAME[passageOf(item)] || []).filter(x => x.id !== item.id && !K.retired['r:' + x.id]).forEach(x => follow.push({ step: 'more', item: x }));
     // 2. three words of the passage taken out, to put back from a bank (with one word that does not belong): words of
     //    level 3 to 5 that occur once, the ones you are working on or want first, then level 4 words not met yet
     const pref = w => (['learning', 'wait'].includes(status(w)) || (K.w[w] && K.w[w].want > 0)) ? 0 : status(w) === 'untouched' ? 1 : 2;
@@ -1504,7 +1509,103 @@
       onEnter = go; inp.focus();
     }
   }
+  // ---------- a passage: the paper's questions on it, all at once; then the steps that take words out of it ----------
+  // First screen: the passage and every question the paper asks on it (one or two), one "Check". Then, one at a time
+  // (as the learner liked on 15 October): three words to put back from a bank, a word to type, a sentence to type
+  // from memory (planFollow; fewer when "simpler" is on).
+  function passageParts(item) {
+    const body = item.t.indexOf('\n') > 0 ? item.t.slice(0, item.t.indexOf('\n')) : item.t;
+    const qs = [item].concat((SAME[passageOf(item)] || []).filter(x => x.id !== item.id && !K.retired['r:' + x.id]));
+    const pref = w => (['learning', 'wait'].includes(status(w)) || (K.w[w] && K.w[w].want > 0)) ? 0 : status(w) === 'untouched' ? 1 : 2;
+    const pool = [...new Set(body.filter(w => byWord[w] && byWord[w].lv >= 3 && byWord[w].lv <= 5 && body.indexOf(w) === body.lastIndexOf(w) && !['easy', 'drop'].includes(status(w))))]
+      .sort((a, b) => pref(a) - pref(b) || rand(3) - 1);
+    const rank = w => ({ learning: 0, wait: 1, resting: 2, known: 3, untouched: 4 })[status(w)];
+    const typed = [...new Set(body.filter(w => byWord[w] && byWord[w].lv === D.level && rank(w) != null && body.indexOf(w) === body.lastIndexOf(w)))].sort((a, b) => rank(a) - rank(b))[0] || null;
+    const ws = [];
+    if (ease() <= 0) for (const w of pool) { if (ws.length < 3 && w !== typed && ws.concat(typed ? [typed] : []).every(b => Math.abs(body.indexOf(b) - body.indexOf(w)) > 2)) ws.push(w); }
+    ws.sort((a, b) => body.indexOf(a) - body.indexOf(b));
+    return { body, qs, ws: ws.length >= 2 ? ws : [], tw: typed, tat: typed ? body.indexOf(typed) : -1 };
+  }
+  const NUM = '①②③④⑤';
+  function showPassage(item, again) {
+    const p0 = again || passageParts(item), parts = Object.assign({}, p0, { ws: [], tw: null, tat: -1 });      // the gaps come in the later steps
+    const task = current = { word: null, type: 'reading', item, multi: true, parts, started: Date.now(), done: false };
+    follow = [];
+    const ws = parts.ws, at = ws.map(w => parts.body.indexOf(w));
+    const odd = ws.length ? distractorWords(ws[0], 1, new Set(item.t)).map(x => x.w) : [];
+    const bank = shuffle(ws.concat(odd)), filled = ws.map(() => null), chosen = parts.qs.map(() => null);
+    const host = el('div'), chips = el('div', { class: 'chips bankchips' });
+    const tn = ws.length;          // the typed word's number comes after the bank's
+    const draw = () => {
+      host.replaceChildren(readToks(parts.body, { gaps: at.concat(parts.tw ? [parts.tat] : []), gapEl: gi => gi === tn
+        ? el('span', { class: 'gap numgap', text: NUM[gi] })
+        : filled[gi] ? el('span', { class: 'gap filledgap', text: filled[gi], onclick: () => { filled[gi] = null; draw(); } }) : el('span', { class: 'gap numgap', text: NUM[gi] }) }));
+      chips.replaceChildren(...bank.map(w => el('button', { class: 'chip zh', text: w, onclick: () => { const gi = filled.indexOf(null); if (gi < 0) return; filled[gi] = w; draw(); } })));
+      [...chips.children].forEach((c, i) => { c.disabled = filled.includes(bank[i]); });
+    };
+    const inp = parts.tw ? textInput('the missing word, in characters') : null, hintTask = { word: parts.tw };
+    const qblocks = parts.qs.map((q, qi) => {
+      const line = q.t.slice(q.t.indexOf('\n') + 1).join('').replace(/^★\s*/, '');
+      const box = el('div', { class: 'choices' + (q.o.every(o => o.length <= 4) ? ' two' : '') });
+      q.o.forEach((o, oi) => box.append(el('button', { class: 'choice zh', text: o, onclick: () => { chosen[qi] = oi; [...box.children].forEach((b, k) => b.classList.toggle('picked', k === oi)); } })));
+      return el('div', { class: 'qblock' }, el('div', { class: 'qline' }, el('b', { text: (parts.qs.length > 1 ? 'Question ' + (qi + 1) + '  ' : '') }), readToks(q.t.slice(q.t.indexOf('\n') + 2))), box);
+    });
+    const go = () => {
+      const ms = Date.now() - task.started, out = { filled: filled.slice(), typed: inp ? normZh(inp.value) : '', chosen: chosen.slice() };
+      ws.forEach((w, i) => {
+        const ok = filled[i] === w, before = rec(w);
+        log({ k: 'ans', w, type: 'gap', part: 'm', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'bank',
+          verdict: ok ? 'right' : 'wrong', res: { m: T(ok, 'choice') }, ans: filled[i] || '', shown: bank, ms, p: +pRight(w, 'gap', new Date()).toFixed(3) });
+      });
+      if (parts.tw) {
+        const v = out.typed, ok = v === parts.tw, before = rec(parts.tw);
+        const near = !ok && v && byWord[v] && overlaps(byWord[v], byWord[parts.tw]);
+        out.typedMark = ok ? 'right' : near ? 'unchecked' : 'wrong';
+        log({ k: 'ans', w: parts.tw, type: 'typedGap', part: 'r', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'typed',
+          verdict: out.typedMark, res: ok ? { r: T(true), s: T(true), m: T(true, 'implied') } : near ? {} : { r: T(false) }, ans: v, ms, hint: !!hintTask.hint, p: +pRight(parts.tw, 'typedGap', new Date()).toFixed(3) });
+      }
+      parts.qs.forEach((q, qi) => log({ k: 'read', rid: q.id, kind: 'p', src: q.src, step: qi ? 'more' : null, ok: chosen[qi] === q.a, ans: chosen[qi] == null ? '' : q.o[chosen[qi]], ms, idk: chosen[qi] == null, en: !!task.en }));
+      task.done = true; st.counter += ws.length + (parts.tw ? 1 : 0) + parts.qs.length; st.sinceReading = 0;
+      planFollow(item, true); save();
+      hist.push({ task, out }); if (hist.length > 30) hist.shift();
+      viewing = -1;
+      showPassageResult(task, out);
+    };
+    idkNow = () => { inp && (inp.value = ''); filled.fill(null); chosen.fill(null); go(); };
+    draw();
+    screen('reading', el('div', { class: 'prompt', text: 'Read the passage. ' + (ws.length ? 'Put back ' + NUM.slice(0, ws.length).split('').join(' ') + ' from the words below (one does not belong). ' : '') +
+        (parts.tw ? 'Type the missing word ' + NUM[tn] + '. ' : '') + 'Then answer the question' + (parts.qs.length > 1 ? 's.' : '.') }),
+      host, englishButton(task, enOf(item)), ws.length ? chips : '',
+      parts.tw ? el('div', { class: 'typedline' }, el('span', { class: 'muted small', text: NUM[tn] + '  ' + byWord[parts.tw].short }), inp, hintButton(hintTask)) : '',
+      qblocks, el('button', { class: 'primary', text: 'Check', onclick: go }), idkButton());
+  }
+  function showPassageResult(task, out) {
+    const item = task.item, parts = task.parts, ws = parts.ws, tn = ws.length;
+    const marks = ws.map((w, i) => out.filled[i] === w).concat(parts.tw ? [out.typedMark === 'right'] : []).concat(parts.qs.map((q, qi) => out.chosen[qi] === q.a));
+    const n = marks.filter(Boolean).length;
+    const gapEl = gi => {
+      const w = gi === tn ? parts.tw : ws[gi], put = gi === tn ? out.typed : out.filled[gi];
+      const ok = gi === tn ? out.typedMark === 'right' : put === w;
+      return el('span', { class: 'tok filled ' + (ok ? 'okgap' : gi === tn && out.typedMark === 'unchecked' ? '' : 'badgap') }, wordEl('span', w, null, { text: w }), put && !ok ? el('sup', { text: ' not ' + put }) : null);
+    };
+    screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
+      el('div', { class: 'verdict ' + (n === marks.length ? 'right' : 'wrong') }, n === marks.length ? 'Right' : marks.length === 1 ? 'Wrong' : n + ' of ' + marks.length + ' right'),
+      readToks(parts.body, { gaps: ws.map(w => parts.body.indexOf(w)).concat(parts.tw ? [parts.tat] : []), gapEl }),
+      enOf(item) ? el('div', { class: 'en small', text: enOf(item).split('\n★')[0] }) : '',
+      parts.qs.map((q, qi) => el('div', { class: 'qblock' },
+        el('div', { class: 'qline' }, readToks(q.t.slice(q.t.indexOf('\n') + 2))),
+        el('div', { class: 'vline ' + (out.chosen[qi] === q.a ? 'ok' : 'bad') }, el('b', { text: (out.chosen[qi] === q.a ? '✓ ' : '✗ ') + q.o[q.a] }),
+          out.chosen[qi] != null && out.chosen[qi] !== q.a ? ' — you chose ' + q.o[out.chosen[qi]] : out.chosen[qi] == null ? ' — not answered' : '',
+          q.eo ? el('span', { class: 'muted small', text: '  (' + q.eo[q.a] + ')' }) : null))),
+      ws.length || parts.tw ? el('div', { class: 'small also' }, ws.concat(parts.tw ? [parts.tw] : []).flatMap((w, i) => [i ? ' · ' : '', el('b', { class: 'zh', text: w }), ' ' + readings(w) + ' ' + byWord[w].short])) : '',
+      ...grammarLines(item.g),
+      el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }),
+      el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question' + (parts.qs.length > 1 ? 's ' : ' ') + parts.qs.map(q => q.id.split('-')[1]).join(' and ') + '.' }),
+      el('button', { class: 'primary', text: 'Next', onclick: goForward }));
+    onEnter = goForward;
+  }
   function showReading(item, inFollow) {
+    if (item.k === 'p' && !inFollow) return showPassage(item);
     const task = current = { word: null, type: 'reading', item, step: inFollow ? 'more' : null, started: Date.now(), done: false };
     if (!inFollow) planFollow(item);
     const done = (ok, ans) => finishReading(task, { ok, ans });
@@ -1547,6 +1648,7 @@
     showReadingResult(task, out);
   }
   function showReadingResult(task, out) {
+    if (task.multi) return showPassageResult(task, out);
     const item = task.item, paper = (D.papers || {})[item.src] || {};
     if (task.step === 'bank') {            // the words put back: each gap right or wrong, the passage whole again
       const n = task.ws.filter((w, i) => out.filled[i] === w).length;
@@ -1613,6 +1715,7 @@
     if (viewing >= 0 && viewing < hist.length - 1) { viewing++; return showResult(hist[viewing].task, hist[viewing].out); }
     const t = viewing >= 0 ? resume : null;
     viewing = -1; resume = null;
+    if (t && t.multi) return showPassage(t.item, t.parts);
     if (t && t.item) return t.step === 'sentence' ? showFollow({ step: 'sentence', item: t.item, span: t.span }) : t.step === 'bank' ? showFollow({ step: 'bank', item: t.item, ws: t.ws, at: t.at })
       : t.type === 'reading' ? showReading(t.item, t.step === 'more') : showFollow({ step: 'word', item: t.item, w: t.word, at: t.at });
     if (t) return showTask(t);
@@ -1621,6 +1724,7 @@
   $('backBtn').addEventListener('click', goBack);
 
   function advance() {
+    if (window.__reloadWanted) { save(); return location.reload(); }
     $('wordmenu').hidden = true;
     idkNow = () => {};
     if (follow.length) { idle = null; return showFollow(follow.shift()); }
@@ -1698,11 +1802,9 @@
   // Newer words and sentences arrived while the app was open: load them at once if nothing has been answered yet in
   // this visit, otherwise offer it.
   const counterAtLoad = () => window.__counterAtLoad;
-  window.addEventListener('hanyu-newdata', () => {
-    if (st.counter === counterAtLoad()) return location.reload();
-    toast(el('span', null, 'New words and sentences have arrived.  ', el('button', { text: 'load them', onclick: () => location.reload() })));
-    clearTimeout(toast.timer);
-  });
+  // New words and sentences, or a new version, arrived while the app was open: they are loaded at the next "Next", never
+  // in the middle of a question (before 15 October the question on screen was swapped for another a moment after opening).
+  window.addEventListener('hanyu-newdata', () => { window.__reloadWanted = true; });
   $('menu').addEventListener('click', e => { if (e.target === $('menu')) $('menu').hidden = true; });
 
   document.body.classList.toggle('noglosses', !st.glosses);
@@ -1741,7 +1843,8 @@
     reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.find(x => x.id === id)),
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
-    current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, ws: current.ws || null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
+    current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, ws: current.ws || (current.parts ? current.parts.ws : null),
+      multi: !!current.multi, tw: current.parts ? current.parts.tw : null, qa: current.parts ? current.parts.qs.map(q => [q.id, q.a]) : null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
   window.__app.ready = init().then(() => { window.__counterAtLoad = st.counter; window.__app.started = true; });

@@ -86,7 +86,8 @@
     if (LOCAL) { await script('private/data.js'); return start(window.DATA); }
     if ('serviceWorker' in navigator) {
       const had = !!navigator.serviceWorker.controller;      // a new release took over: reload once to run it
-      navigator.serviceWorker.addEventListener('controllerchange', () => { if (had) location.reload(); });
+      // a new release took over: before the first question, reload at once; once a question is on screen, wait for the next "Next"
+      navigator.serviceWorker.addEventListener('controllerchange', () => { if (!had) return; if (window.__app && window.__app.started) window.__reloadWanted = true; else location.reload(); });
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
     const token = localStorage.getItem(TOKEN_KEY);
