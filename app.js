@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 28;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 29;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -1381,6 +1381,8 @@
     opt = opt || {};
     const line = el('div', { class: 'sent rd' + (opt.cls ? ' ' + opt.cls : '') });
     toks.forEach((w, i) => {
+      const gi = opt.gaps ? opt.gaps.indexOf(i) : -1;
+      if (gi >= 0) { line.append(opt.gapEl(gi)); return; }
       if (opt.hide && i >= opt.hide[0] && i < opt.hide[1]) { if (i === opt.hide[0]) line.append(el('span', { class: 'gap wide', text: '　　　　' })); return; }
       if (i === opt.blank) { line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' })); return; }
       if (opt.mark && i >= opt.mark[0] && i < opt.mark[1] && isZh(w)) { line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok target', text: w })); return; }
@@ -1402,12 +1404,28 @@
   }
   // After a passage's own question, up to two more steps on the same passage: type a word of it that you are working
   // on, then type one of its sentences from memory.
+  // the passage of an exam item without its question: items that share it are the paper's questions on one passage
+  const passageOf = x => { const t = x.t.join('').split('\n★')[0]; const m = t.match(/^([\s\S]*[。！？…”])([^。！？…”]+[：:？?])$/); return (m ? m[1] : t).trim(); };
+  const SAME = {};
+  R.filter(x => x.k === 'p').forEach(x => { (SAME[passageOf(x)] = SAME[passageOf(x)] || []).push(x); });
   function planFollow(item) {
     follow = [];
     if (item.k !== 'p') return;
     const body = item.t.indexOf('\n') > 0 ? item.t.slice(0, item.t.indexOf('\n')) : item.t;
+    // 1. the paper's other questions on the same passage
+    (SAME[passageOf(item)] || []).filter(x => x.id !== item.id && !K.retired['r:' + x.id]).forEach(x => follow.push({ step: 'more', item: x }));
+    // 2. three words of the passage taken out, to put back from a bank (with one word that does not belong): words of
+    //    level 3 to 5 that occur once, the ones you are working on or want first, then level 4 words not met yet
+    const pref = w => (['learning', 'wait'].includes(status(w)) || (K.w[w] && K.w[w].want > 0)) ? 0 : status(w) === 'untouched' ? 1 : 2;
+    const pool = [...new Set(body.filter(w => byWord[w] && byWord[w].lv >= 3 && byWord[w].lv <= 5 && body.indexOf(w) === body.lastIndexOf(w) && !['easy', 'drop'].includes(status(w))))]
+      .sort((a, b) => pref(a) - pref(b) || rand(3) - 1);
+    const bank = [];
+    for (const w of pool) { if (bank.length < 3 && bank.every(b => Math.abs(body.indexOf(b) - body.indexOf(w)) > 2)) bank.push(w); }
+    bank.sort((a, b) => body.indexOf(a) - body.indexOf(b));
+    if (bank.length >= 2) follow.push({ step: 'bank', item, ws: bank, at: bank.map(w => body.indexOf(w)) });
     const rank = w => ({ learning: 0, wait: 1, resting: 2, known: 3, untouched: 4 })[status(w)];
-    const cands = [...new Set(body.filter(w => byWord[w] && byWord[w].lv === D.level && rank(w) != null && body.indexOf(w) === body.lastIndexOf(w)))].sort((a, b) => rank(a) - rank(b));
+    const inBank = new Set(bank);
+    const cands = [...new Set(body.filter(w => byWord[w] && byWord[w].lv === D.level && rank(w) != null && body.indexOf(w) === body.lastIndexOf(w) && !inBank.has(w)))].sort((a, b) => rank(a) - rank(b));
     if (cands.length) follow.push({ step: 'word', item, w: cands[0], at: body.indexOf(cands[0]) });
     // a sentence of 8 to 24 characters that is not the first one
     const ends = []; body.forEach((w, i) => { if (/[。！？]/.test(w)) ends.push(i); });
@@ -1417,6 +1435,39 @@
   }
   function showFollow(f) {
     const item = f.item;
+    if (f.step === 'more') return showReading(item, true);
+    if (f.step === 'bank') {
+      const task = current = { word: null, type: 'reading', item, step: 'bank', ws: f.ws, at: f.at, started: Date.now(), done: false };
+      const odd = distractorWords(f.ws[0], 1, new Set(item.t)).map(x => x.w);
+      const bank = shuffle(f.ws.concat(odd)), filled = f.ws.map(() => null);
+      const host = el('div'), chips = el('div', { class: 'chips bankchips' });
+      const draw = () => {
+        host.replaceChildren(readToks(item.t, { gaps: f.at, gapEl: gi => filled[gi]
+          ? el('span', { class: 'gap filledgap', text: filled[gi], onclick: () => { filled[gi] = null; draw(); } })
+          : el('span', { class: 'gap numgap', text: '①②③'[gi] }) }));
+        chips.replaceChildren(...bank.map(w => el('button', { class: 'chip zh', text: w, disabled: filled.includes(w) ? '' : null, onclick: () => {
+          const gi = filled.indexOf(null); if (gi < 0) return; filled[gi] = w; draw();
+        } })));
+        [...chips.children].forEach((c, i) => { c.disabled = filled.includes(bank[i]); });
+      };
+      const go = () => {
+        if (filled.includes(null)) return;
+        const ms = Date.now() - task.started;
+        f.ws.forEach((w, i) => {
+          const ok = filled[i] === w, before = rec(w);
+          log({ k: 'ans', w, type: 'gap', part: 'm', reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, rid: item.id, step: 'bank',
+            verdict: ok ? 'right' : 'wrong', res: { m: T(ok, 'choice') }, ans: filled[i], shown: bank, ms, p: +pRight(w, 'gap', new Date()).toFixed(3) });
+        });
+        st.counter += f.ws.length - 1;
+        finishReading(task, { ok: filled.every((w, i) => w === f.ws[i]), ans: filled.join(','), filled: filled.slice() });
+      };
+      idkNow = () => finishReading(task, { ok: false, idk: true, ans: '', filled: f.ws.map(() => '') });
+      draw();
+      screen('reading · gaps', el('div', { class: 'prompt', text: 'The same passage with words taken out. Tap the words in order: ① first. (One word does not belong.)' }),
+        host, chips, el('button', { class: 'primary', text: 'Check', onclick: go }), idkButton());
+      onEnter = go;
+      return;
+    }
     if (f.step === 'word') {
       const task = current = { word: f.w, type: 'typedGap', part: 'r', reason: null, extra: false, check: false, sent: null, sense: -1, started: Date.now(), done: false, item, at: f.at };
       const inp = textInput('the missing word, in characters');
@@ -1443,9 +1494,9 @@
       onEnter = go; inp.focus();
     }
   }
-  function showReading(item) {
-    const task = current = { word: null, type: 'reading', item, started: Date.now(), done: false };
-    planFollow(item);
+  function showReading(item, inFollow) {
+    const task = current = { word: null, type: 'reading', item, step: inFollow ? 'more' : null, started: Date.now(), done: false };
+    if (!inFollow) planFollow(item);
     const done = (ok, ans) => finishReading(task, { ok, ans });
     idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
     const kids = [];
@@ -1487,6 +1538,18 @@
   }
   function showReadingResult(task, out) {
     const item = task.item, paper = (D.papers || {})[item.src] || {};
+    if (task.step === 'bank') {            // the words put back: each gap right or wrong, the passage whole again
+      const n = task.ws.filter((w, i) => out.filled[i] === w).length;
+      screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
+        el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : n + ' of ' + task.ws.length + ' right'),
+        readToks(item.t, { gaps: task.at, gapEl: gi => el('span', { class: 'tok filled ' + (out.filled[gi] === task.ws[gi] ? 'okgap' : 'badgap') }, wordEl('span', task.ws[gi], null, { text: task.ws[gi] }),
+          out.filled[gi] && out.filled[gi] !== task.ws[gi] ? el('sup', { text: ' not ' + out.filled[gi] }) : null) }),
+        enOf(item) ? el('div', { class: 'en small', text: enOf(item) }) : '',
+        el('div', { class: 'small also' }, task.ws.map((w, i) => [i ? ' · ' : '', el('b', { class: 'zh', text: w }), ' ' + readings(w) + ' ' + byWord[w].short]).flat()),
+        el('button', { class: 'primary', text: 'Next', onclick: goForward }));
+      onEnter = goForward;
+      return;
+    }
     if (task.step === 'sentence') {        // the sentence typed from memory: the same, or shown against the passage's own
       const want = item.t.slice(task.span[0], task.span[1]).join('');
       const d = out.ok || out.idk ? null : diff(out.ans, normZh(want));
@@ -1540,7 +1603,8 @@
     if (viewing >= 0 && viewing < hist.length - 1) { viewing++; return showResult(hist[viewing].task, hist[viewing].out); }
     const t = viewing >= 0 ? resume : null;
     viewing = -1; resume = null;
-    if (t && t.item) return t.step === 'sentence' ? showFollow({ step: 'sentence', item: t.item, span: t.span }) : t.type === 'reading' ? showReading(t.item) : showFollow({ step: 'word', item: t.item, w: t.word, at: t.at });
+    if (t && t.item) return t.step === 'sentence' ? showFollow({ step: 'sentence', item: t.item, span: t.span }) : t.step === 'bank' ? showFollow({ step: 'bank', item: t.item, ws: t.ws, at: t.at })
+      : t.type === 'reading' ? showReading(t.item, t.step === 'more') : showFollow({ step: 'word', item: t.item, w: t.word, at: t.at });
     if (t) return showTask(t);
     advance();
   }
@@ -1667,7 +1731,7 @@
     reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.find(x => x.id === id)),
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
-    current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
+    current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, ws: current.ws || null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
   window.__app.ready = init().then(() => { window.__counterAtLoad = st.counter; window.__app.started = true; });
