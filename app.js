@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 23;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 28;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -10,7 +10,7 @@
   const KEY = 'hanyu-v2';
   const fsrs = F.fsrs(F.generatorParameters({ request_retention: TARGET_R, enable_fuzz: false, enable_short_term: false }));
   const TASKNAME = { gap: 'gap with choices', read: 'pinyin and meaning', retype: 'read, hide, retype', tiles: 'tiles', tilesType: 'typed tiles', typedGap: 'typed gap',
-    meaningToWord: 'type the word', typeBack: 'type back' };
+    meaningToWord: 'type the word', typeBack: 'type back', vocabMean: 'vocab test: write the English', vocabWord: 'vocab test: write the word' };
   const PARTS = { m: 'meaning', s: 'syllables', t: 'tones', r: 'recall', u: 'use' };
 
   const words = D.words, S = D.sentences, byWord = {};
@@ -97,6 +97,7 @@
   const TASK = {
     gap: { part: 'm', g: 0.25, d: -1.0 }, read: { part: 'm', g: 0.25, d: -1.0 },
     retype: { part: 'u', g: 0, d: -1.0 }, tiles: { part: 'u', g: 0, d: -0.3 },
+    vocabMean: { part: 'm', g: 0, d: -0.3 }, vocabWord: { part: 'r', g: 0, d: 0.6 },      // the vocab test: Chinese to English, English to Chinese
     tilesType: { part: 'r', g: 0, d: 0.0 }, typedGap: { part: 'r', g: 0, d: 0.4 }, meaningToWord: { part: 'r', g: 0, d: 0.6 }, typeBack: { part: 'r', g: 0, d: 1.0 },
   };
   const blank = () => ({ w: {}, sent: {}, retired: {}, sorted: {}, imported: {}, nAns: 0, ms: {}, read: {},
@@ -120,7 +121,7 @@
     if (!ev.w) return;
     const r = rec(ev.w);
     if (ev.k === 'mark') {
-      if (ev.id && ev.src === 'import') K.imported[ev.id] = true;
+      if (ev.src === 'import') K.imported[ev.imp || (ev.v + ':' + ev.w)] = true;      // (events before 15 October carry no imp)
       if (ev.v === 'easy' || ev.v === 'unknown') r.markEv = ev.id;
       if (ev.v === 'easy') {
         if (r.mark === 'easy') return;       // already so (the same mark can arrive twice, from two devices)
@@ -171,7 +172,7 @@
       const first = part.right + part.wrong === 0 && part.src !== 'said';
       // right = Good, wrong = Again. Easy only for typing a word never taught here (you knew it already), and for the meaning
       // that implies. Hard for a right answer that was slow for you.
-      const rating = !o.ok ? F.Rating.Again : (first && ev.prior && (p === 'r' || o.how === 'implied')) ? F.Rating.Easy
+      const rating = !o.ok ? F.Rating.Again : (ev.hard || hardRefs.has(ev.id)) ? F.Rating.Hard : (first && ev.prior && (p === 'r' || o.how === 'implied')) ? F.Rating.Easy
         : (slow && o.how === 'typed') ? F.Rating.Hard : F.Rating.Good;
       // What does not change the memory state: a second answer on the same day (unless a right has turned wrong), and
       // a right pick from four on a part that was not slipping (it may be a guess, and proves little).
@@ -186,6 +187,7 @@
     // questions apart (once, if you typed it right before it was ever taught). It is "known" when typed right on a
     // second day. Missing its recall puts it back in play.
     r.started = true; r.lastAns = +time; r.lastN = K.nAns; r.lastOk = ev.verdict === 'right';
+    if (ev.type === 'vocabMean' || ev.type === 'vocabWord') r.vt = +new Date(ev.t);
     if (res.r && res.r.how === 'typed') {
       if (res.r.ok) {
         r.rr = (r.rr || []).concat([{ n: K.nAns, d: day }]);
@@ -226,9 +228,11 @@
     if (ev.part) r.cyc[ev.part] = (r.cyc[ev.part] || 0) + 1;     // how many times each kind of step has been done, to rotate tasks
   }
   let devices = {};      // device name -> what kind of device it said it was
+  let hardRefs = new Set();
   function rebuild() {
     K = blank(); devices = {};
     const undone = new Set(events.filter(e => e.k === 'undo').map(e => e.ref));
+    hardRefs = new Set(events.filter(e => e.k === 'hard' && !undone.has(e.id)).map(e => e.ref));      // right answers you said were hard
     events.forEach(e => { if (!undone.has(e.id)) apply(e); });
   }
   function log(ev) {
@@ -240,7 +244,7 @@
   // lists you gave me, built into the data file: applied once, as marks
   function applyImports() {
     if (localStorage.getItem('hanyu-test-noimport')) return;       // the tests start from nothing
-    (D.marks || []).forEach(m => { const id = m.v + ':' + m.w; if (!K.imported[id]) log({ k: 'mark', w: m.w, v: m.v, src: 'import', id }); });
+    (D.marks || []).forEach(m => { const id = m.v + ':' + m.w; if (!K.imported[id]) log({ k: 'mark', w: m.w, v: m.v, src: 'import', imp: id }); });
   }
 
   // ---------- sync: each device writes only its own files in the private repository and reads the others' ----------
@@ -328,6 +332,24 @@
   }
   const tested = part => !!part && part.right + part.wrong > 0;
   const sentsOf = w => (byWord[w] ? byWord[w].s : []).filter(x => !K.retired[x[0]]);
+  // ---------- words outside the HSK lists (通往): one you click, or mark, becomes a word of your own ----------
+  // Its pinyin and meaning come from the dictionary entry the app already has for it (on the sentence's tile, or for
+  // the exam items). Its sentences are the app's sentences that contain it, if any; with none, it is asked from its
+  // meaning (type the word).
+  function extraInfo(w) {
+    if ((D.gloss || {})[w]) return { p: D.gloss[w][0], g: D.gloss[w][1] };
+    for (const sid in S) { const t = S[sid].t.find(x => x.w === w && x.p); if (t) return { p: t.p, g: t.g }; }
+    return null;
+  }
+  function addExtra(w, info) {
+    if (byWord[w] || !info || !info.p || !/[一-鿿]/.test(w)) return byWord[w] || null;
+    const items = String(info.g || '').split(/;\s*/).filter(Boolean);
+    const s = [];
+    for (const sid in S) { if (s.length >= 12) break; if (S[sid].t.some(t => t.w === w)) s.push([S[sid].id, -1]); }
+    const word = { w, lv: 7, extra: true, p: [info.p], n: [], def: info.g || '', short: items.slice(0, 2).join('; ') || info.g || '', items: items.length ? items : [info.g || ''], pos: '', s, i: words.length };
+    words.push(word); byWord[w] = word;
+    return word;
+  }
   function consolidated(r) { return ['m', 'r'].every(p => r.parts[p] && r.parts[p].right > 0 && r.parts[p].card.stability >= 4); }
   function status(w) {
     const r = K.w[w], word = byWord[w];
@@ -391,9 +413,13 @@
     if (c.length > 1 && r) c = c.filter(x => x[0] !== r.lastSent);
     if (!c.length) return null;
     // first: as few other words you don't know as possible (ideally the word asked about is the only new thing)
-    const shaky = x => wordToks(S[x[0]]).filter(t => t.w !== w && byWord[t.w] && ['wait', 'learning', 'checking', 'untouched', 'beyond'].includes(status(t.w))).length;
+    // A sentence is worth more when it also holds other words you are working on (it teaches them too, up to two count),
+    // and less for each word in it you have not met at all.
+    const others = x => wordToks(S[x[0]]).filter(t => t.w !== w && byWord[t.w]);
+    const teach = x => Math.min(2, others(x).filter(t => ['wait', 'learning'].includes(status(t.w)) || (K.w[t.w] && K.w[t.w].want > 0 && status(t.w) !== 'known')).length);
+    const shaky = x => others(x).filter(t => ['untouched', 'beyond'].includes(status(t.w))).length - teach(x);
     // a word out of play gets a longer sentence when it has one (more to read); a word in play gets a short one
-    const wantLong = !opt.short && r && ['known', 'resting', 'easy'].includes(status(w));
+    const wantLong = !opt.short && r && (['known', 'resting', 'easy'].includes(status(w)) || ease() < 0) && ease() <= 0;
     // A sentence you have already had counts against it more than a word in it that you may not know: each earlier
     // showing weighs as much as two and a half such words. (It used to be the other way round, and the same sentences kept coming.)
     const score = x => (wantLong ? (S[x[0]].long ? 0 : 3000) : (S[x[0]].long ? 500 : 0)) + shaky(x) * 250 + ((r && r.senses[x[1]] ? r.senses[x[1]].right : 0) * 10) + (K.sent[x[0]] ? K.sent[x[0]].seen : 0) * 600;
@@ -468,6 +494,20 @@
     }
     return st.pace || 0;
   }
+  // simpler / harder: which kind of question, for the next half hour (then it is gone). Up to two steps either way.
+  // Simpler: the app picks questions you are more likely to get right, short sentences, and fewer exam items.
+  // Harder: the reverse, with longer sentences when a word has them and an exam item every other question.
+  const EASE_MIN = 30;
+  function ease() {
+    if (st.ease && Date.now() - (st.easeT || 0) > EASE_MIN * 60000) st.ease = 0;
+    return st.ease || 0;
+  }
+  function nudgeEase(d) {
+    st.ease = Math.max(-2, Math.min(2, ease() + d)); st.easeT = Date.now(); save();
+    log({ k: 'ease', d, now: st.ease });
+    const n = Math.abs(st.ease);
+    toast(st.ease === 0 ? 'Back to the usual questions' : (st.ease > 0 ? 'Simpler' : 'Harder') + ' questions for the next ' + EASE_MIN + ' minutes' + (n > 1 ? ' (two steps)' : ''));
+  }
   function nudge(d) {
     pace();
     st.pace = Math.max(-3, Math.min(3, (st.pace || 0) + d)); st.paceAt = st.counter; st.paceTime = Date.now();
@@ -500,7 +540,7 @@
     const pending = new Set(st.retry.map(x => x.w));
     const free = w => live(w) && !pending.has(w);
     // reading: one question in four is an item from an HSK 4 exam paper (see pickReading)
-    if (R.length && !st.noReading && (st.sinceReading || 0) >= READ_EVERY - 1) { const item = pickReading(); if (item) return { reading: item }; }
+    if (R.length && !st.noReading && (st.sinceReading || 0) >= Math.max(2, READ_EVERY + ease()) - 1) { const item = pickReading(); if (item) return { reading: item }; }
     // a word you marked "want to learn" that has not come up yet (a level 1-3 word would otherwise be assumed known):
     // it does not wait behind reviews, but takes at most one question in three
     // A few such words come in ahead of reviews, one question in three. A long list (imported from your homework) comes
@@ -574,14 +614,14 @@
   // the easiest. "faster" lowers the floor (harder questions sooner), "slower" raises it.
   function available(w) {
     const has = sentsOf(w).length > 0;
-    if (!has) return ['read', 'meaningToWord'];
+    if (!has) return byWord[w].extra ? ['meaningToWord'] : ['read', 'meaningToWord'];
     const hit = !!pickSent(w, { needHit: true }), short = !!pickSent(w, { short: true });
     const tilesLately = st.recent.slice(0, 4).some(x => x.type === 'tiles');       // tile order cannot be fully marked: at most one in five
     const can = [hit && 'gap', short && !tilesLately && 'tiles', short && 'tilesType', hit && 'typedGap', short && 'retype', pickSent(w, { seenOnly: true, short: true }) && 'typeBack'].filter(Boolean);
     return can.length ? can : ['meaningToWord'];       // every sentence of the word has been shown today: ask for the word from its meaning instead
   }
   function chooseTask(w) {
-    const now = new Date(), floor = Math.min(0.8, Math.max(0.5, 0.6 - 0.05 * pace()));
+    const now = new Date(), floor = Math.min(0.9, Math.max(0.4, 0.6 - 0.05 * pace() + 0.1 * ease()));
     const twice = t => st.recent.length > 1 && st.recent[0].type === t && st.recent[1].type === t;
     let can = available(w).filter(t => !twice(t));
     if (!can.length) can = available(w);
@@ -611,6 +651,7 @@
     clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 4000);
   }
   function mark(w, v, src) {
+    if (!byWord[w]) addExtra(w, extraInfo(w));
     const r = K.w[w], was = r ? r.mark : null;
     const during = current && !current.done && current.word === w;
     if (during && v === 'unknown') { idkNow(); log({ k: 'mark', w, v, src: src || 'click' }); return; }   // show the answer, then put it on the list
@@ -638,8 +679,9 @@
       log({ k: 'undo', ref: node._look }); rebuild(); node._look = null; node.classList.remove('noted');
       return toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), el('i', { text: '  · no longer noted' })));
     }
+    const extra = !byWord[w] && addExtra(w, i);
     const noted = !!byWord[w] && !(current && current.word === w);
-    const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null });
+    const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null, ...(byWord[w] && byWord[w].extra ? { p: i.p, g: i.g } : {}) });
     if (noted && node) { node.classList.add('noted'); node._look = ev.id; }
     toast(el('span', null, el('b', { class: 'zh', text: w }), '  ' + i.p + (i.g ? ' — ' + i.g : ''), noted ? el('i', { text: '  · noted as not known' }) : ''),
       noted ? () => { log({ k: 'undo', ref: ev.id }); rebuild(); if (node) { node.classList.remove('noted'); node._look = null; } } : null);
@@ -726,6 +768,17 @@
     return line;
   }
   // set phrases in a sentence (出问题), from the dictionary: shown under it, since the tiles are the separate words
+  // the other words of a sentence that it may be teaching you: level 3 and up, not known or marked easy. Tap one to note it.
+  function alsoLine(s, w) {
+    const seen = new Set([w]), list = [];
+    wordToks(s).forEach(t => {
+      if (seen.has(t.w) || !byWord[t.w] || byWord[t.w].lv < 3 || ['known', 'easy', 'resting', 'drop'].includes(status(t.w))) return;
+      seen.add(t.w); list.push(t);
+    });
+    if (!list.length) return null;
+    return el('div', { class: 'muted small phrase also' }, el('b', { text: 'Also here' }), '  ',
+      list.slice(0, 5).flatMap((t, i) => [i ? ' · ' : '', wordEl('span', t.w, t, { class: 'zh', text: t.w }), ' ' + (t.p || readings(t.w)).replace(/ \/ /g, '/') + ' ' + byWord[t.w].short]));
+  }
   // a grammar point the sentence uses: its structure line and a link to its page (AllSet Learning Chinese Grammar Wiki)
   const grammarLines = g => (g || []).filter(x => (D.grammar || {})[x[0]]).map(x => { const p = D.grammar[x[0]]; return el('div', { class: 'muted small phrase gram' },
     el('b', { text: 'Pattern' }), '  ' + (p.s[x[1]] || p.s[0] || '') + '  ', el('a', { href: p.u, target: '_blank', rel: 'noopener', text: p.t }), ' (AllSet Learning Chinese Grammar Wiki)'); });
@@ -741,10 +794,14 @@
     return b;
   }
   // under every question: slower · I don't know · faster
-  const idkButton = () => el('div', { class: 'under' },
+  const idkButton = () => [el('div', { class: 'under' },
     el('button', { class: 'pace slower', title: 'More repetition and fewer new words for a while', text: '‹ slower', onclick: () => nudge(-1) }),
     el('button', { class: 'idk', title: "I don't know", onclick: () => idkNow() }, el('span', { class: 'x', text: '✗' }), el('span', { class: 'lbl', text: "I don't know" })),
-    el('button', { class: 'pace faster', title: 'More new words and fewer easy steps for a while', text: 'faster ›', onclick: () => nudge(1) }));
+    el('button', { class: 'pace faster', title: 'More new words and fewer easy steps for a while', text: 'faster ›', onclick: () => nudge(1) })),
+    el('div', { class: 'under2' },
+      el('button', { class: 'qlink', title: 'Easier kinds of question for the next half hour', text: '‹ simpler', onclick: () => nudgeEase(1) }),
+      el('button', { class: 'vlink', text: 'Vocab test', onclick: () => showVocab() }),
+      el('button', { class: 'qlink', title: 'Harder kinds of question and more reading for the next half hour', text: 'harder ›', onclick: () => nudgeEase(-1) }))];
 
   let sortTouched = false;
   function showSort(batch) {
@@ -790,6 +847,106 @@
       el('div', { class: 'chips' }, chips),
       el('button', { class: 'primary', text: 'Done', onclick: go }));
     onEnter = go;
+  }
+
+  // ---------- vocab test: a table of words, half shown in Chinese (write the English), half in English (write the word) ----------
+  // Marked by the app when you press OK; you can then change a mark (✗ or ? to ✓ if you had it, or back). Saved as answers
+  // like any other, so it moves what the app thinks you know: Chinese to English tests the meaning, English to Chinese
+  // tests recall. A word met here for the first time is found out by it: typed right, it counts as known already.
+  const VOCAB_N = 16;
+  function vocabWords() {
+    const now = Date.now(), fresh = w => byWord[w] && !(K.w[w] && K.w[w].drop) && !(K.w[w] && K.w[w].vt && now - K.w[w].vt < SENT_REST);
+    const want = w => (K.w[w] ? K.w[w].want || 0 : 0);
+    const pick = [], add = (list, n) => { for (const w of list) { if (n <= 0) break; if (fresh(w) && !pick.includes(w)) { pick.push(w); n--; } } };
+    const all = Object.keys(K.w);
+    // words you want but have not met; then words in play or waiting; then words out of play, the most slipped first;
+    // then level 4 words not met yet, in the order they would come
+    add(all.filter(w => want(w) > 0 && ['untouched', 'assumed', 'beyond'].includes(status(w))).sort(() => Math.random() - 0.5), 4);
+    add(all.filter(w => ['learning', 'wait'].includes(status(w))).sort(() => Math.random() - 0.5), 5);
+    add(all.filter(w => ['known', 'resting'].includes(status(w))).sort((a, b) => partR(a, 'm', new Date()) - partR(b, 'm', new Date())), 3);
+    add(order.filter(x => status(x.w) === 'untouched' && want(x.w) >= 0).map(x => x.w), VOCAB_N - pick.length);
+    return pick.slice(0, VOCAB_N).sort(() => Math.random() - 0.5);
+  }
+  const enWords = text => new Set(text.toLowerCase().replace(/\(.*?\)/g, ' ').split(/[^a-z]+/).filter(t => t.length > 1 && !SMALL.has(t)).map(t => t.replace(/(ing|ed|ly|es|s)$/, '')));
+  function markEnglish(answer, word) {          // the answer shares a content word with one of the listed meanings: right
+    const mine = enWords(answer), theirs = enWords(word.items.join(' ; ') + ' ; ' + word.def);
+    if (!mine.size) {           // only short words ("all", "be"): the answer must be one of the meanings as listed
+      const said = answer.toLowerCase().trim();
+      return word.items.some(it => it.toLowerCase().replace(/\(.*?\)/g, '').trim() === said) ? 'right' : 'unsure';
+    }
+    for (const t of mine) if (theirs.has(t)) return 'right';
+    for (const t of mine) for (const u of theirs) if (t.length >= 4 && u.length >= 4 && t.slice(0, 4) === u.slice(0, 4)) return 'unsure';     // organise / organisation
+    return 'wrong';             // no word in common: wrong, unless you change it (a synonym the list does not have)
+  }
+  function markChinese(answer, w) {
+    const v = normZh(answer);
+    if (!v) return null;
+    if (v === w) return 'right';
+    if ((byWord[v] && overlaps(byWord[v], byWord[w])) || (v.length > 1 && (v.includes(w) || w.includes(v)))) return 'unsure';
+    return 'wrong';
+  }
+  function showVocab() {
+    current = null; idle = null;
+    const rows = vocabWords().map(w => ({ w, dir: Math.random() < 0.5 ? 'zh' : 'en' }));      // zh: Chinese shown, write English
+    if (!rows.length) return toast('No words to test right now.');
+    const started = Date.now();
+    const table = el('div', { class: 'vt' }, el('div', { class: 'vrow head' }, el('span', { text: '' }), el('span', { text: 'Your answer' }), el('span', { class: 'c', text: "don't know" })));
+    rows.forEach(r => {
+      const word = byWord[r.w];
+      r.inp = textInput(r.dir === 'zh' ? 'English' : '汉字', r.dir === 'zh');
+      r.idk = el('input', { type: 'checkbox', title: "I don't know" });
+      r.idk.addEventListener('change', () => { r.inp.disabled = r.idk.checked; });
+      r.row = el('div', { class: 'vrow', 'data-word': r.w, 'data-dir': r.dir },
+        r.dir === 'zh' ? wordEl('span', r.w, null, { class: 'q zh', text: r.w }, () => {}, true) : el('span', { class: 'q en', text: word.short }),
+        r.inp, el('label', { class: 'c' }, r.idk));
+      table.append(r.row);
+    });
+    const draw = r => {
+      r.cell.className = 'vmark ' + r.mark;
+      r.cell.textContent = { right: '✓', hard: '✓ hard', wrong: '✗', unsure: '?', idk: '✗' }[r.mark];
+    };
+    const check = () => {
+      rows.forEach(r => {
+        const a = r.inp.value.trim();
+        r.ans = r.idk.checked ? '' : a;
+        r.auto = r.idk.checked || !a ? 'idk' : r.dir === 'zh' ? markEnglish(a, byWord[r.w]) : markChinese(a, r.w);
+        r.mark = r.auto;
+        r.inp.disabled = true; r.idk.disabled = true;
+        r.cell = el('button', { class: 'vmark', title: 'Tap to change' });
+        // a tap goes round the marks: from ? to ✓ to ✗; otherwise between ✓ and ✗
+        const cycle = r.auto === 'unsure' ? ['unsure', 'right', 'hard', 'wrong'] : r.auto === 'right' ? ['right', 'hard', 'wrong'] : [r.auto, 'right', 'hard'];
+        r.cell.addEventListener('click', () => { r.mark = cycle[(cycle.indexOf(r.mark) + 1) % cycle.length]; draw(r); });
+        draw(r);
+        const word = byWord[r.w];
+        r.row.lastChild.replaceWith(r.cell);
+        r.row.after(el('div', { class: 'vans small' }, wordEl('span', r.w, null, { class: 'zh', text: r.w }), '  ', el('span', { class: 'pinyin', text: readings(r.w) }), '  ' + word.short));
+      });
+      const n = k => rows.filter(r => r.mark === k).length;
+      ok.replaceWith(el('div', { class: 'muted small', text: 'Tap a mark to change it: ✓, ✓ hard (right but it took effort), ✗. ' + n('right') + ' right, ' + (n('wrong') + n('idk')) + ' not, ' + n('unsure') + ' for you to decide (?).' }),
+        el('button', { class: 'primary', text: 'Save', onclick: save_ }));
+      onEnter = save_;
+    };
+    const save_ = () => {
+      const ms = Math.round((Date.now() - started) / rows.length);
+      let right = 0, not = 0;
+      rows.forEach(r => {
+        if (r.mark === 'unsure') return log({ k: 'ans', w: r.w, type: r.dir === 'zh' ? 'vocabMean' : 'vocabWord', verdict: 'unchecked', res: {}, ans: r.ans, auto: r.auto, ms, vt: true });
+        const ok = r.mark === 'right' || r.mark === 'hard', before = rec(r.w);
+        const res = r.dir === 'zh' ? { m: T(ok) } : ok ? { r: T(true), s: T(true), m: T(true, 'implied') } : { r: T(false) };
+        if (ok) right++; else not++;
+        const t = r.dir === 'zh' ? 'vocabMean' : 'vocabWord';
+        log({ k: 'ans', w: r.w, type: t, part: TASK[t].part, reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, verdict: ok ? 'right' : 'wrong', res,
+          ans: r.ans, shown: r.dir === 'zh' ? r.w : byWord[r.w].short, auto: r.auto, fixed: r.mark !== r.auto && !(r.mark === 'hard' && r.auto === 'right'), hard: r.mark === 'hard', idk: r.auto === 'idk' && !ok, ms,
+          prior: !before.intro && before.stage === 'none' && !before.started, p: +pRight(r.w, t, new Date()).toFixed(3), vt: true });
+      });
+      st.counter += rows.length; save();
+      toast('Vocab test saved: ' + right + ' right, ' + not + ' not.');
+      advance();
+    };
+    const ok = el('button', { class: 'primary', text: 'OK', onclick: check });
+    screen('vocab test', el('div', { class: 'prompt', text: 'Write the English for the Chinese, and the Chinese for the English. Tick "don\'t know" rather than guess.' }),
+      table, ok, el('button', { class: 'vlink', text: 'Back to practice', onclick: advance }));
+    onEnter = null;
   }
 
   // the words currently being learned, checked, or waiting to be taught: a list to mark
@@ -851,7 +1008,7 @@
   }
 
   // ctx: 'missed' offers "I didn't know this at all"; 'right' offers "Trivially easy"; nothing else to press
-  function wordCard(w, ctx) {
+  function wordCard(w, ctx, ansEv) {
     const word = byWord[w], r = K.w[w] || { parts: {} }, now = new Date();
     const one = p => {
       const part = r.parts[p], v = retr(part, now);
@@ -868,7 +1025,20 @@
       defView(word, 'def'),
       el('div', { class: 'parts' }, Object.keys(PARTS).map(one))),
       ctx === 'missed' && r.mark !== 'unknown' ? offer("✗ I didn't know this at all", 'unknown', 'dont') : null,
-      ctx === 'right' && r.mark !== 'easy' ? offer('✓ Trivially easy', 'easy', 'know') : null];
+      ctx === 'right' ? rightOffers(w, r, ansEv) : null];
+  }
+  // after a right answer: "Trivially easy", and "Hard" (right, but it took effort: held less firmly than a plain right)
+  function rightOffers(w, r, ansEv) {
+    const easy = r.mark !== 'easy' ? el('button', { class: 'know', text: '✓ Trivially easy', onclick: () => { mark(w, 'easy'); easy.disabled = true; easy.textContent = 'Noted'; } }) : null;
+    let hardEv = ansEv && events.find(e => e.k === 'hard' && e.ref === ansEv.id);
+    const hard = ansEv ? el('button', { class: 'hardb', text: hardEv ? 'Hard ✓ (tap to undo)' : 'Right, but hard' }) : null;
+    if (hard) hard.addEventListener('click', () => {
+      if (hardEv) { log({ k: 'undo', ref: hardEv.id }); hardEv = null; hard.textContent = 'Right, but hard'; }
+      else { hardEv = log({ k: 'hard', ref: ansEv.id, w }); hard.textContent = 'Hard ✓ (tap to undo)'; }
+      rebuild();
+    });
+    const kids = [easy, hard].filter(Boolean);
+    return kids.length ? el('div', { class: 'under ' + (kids.length === 2 ? 'two' : 'one') }, kids) : null;
   }
 
   function showIntro(w) {
@@ -1104,7 +1274,7 @@
     const stageBefore = before.stage;
     const pred = {};          // the chance the app gave each part just before this answer
     Object.keys(res).forEach(p => { pred[p] = before.parts[p] ? +retr(before.parts[p], new Date()).toFixed(3) : null; });
-    log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, rid: task.item ? task.item.id : undefined, sense: task.sense,
+    out.ev = log({ k: 'ans', w, type: task.type, part: task.part, reason: task.reason, sid: task.sent ? task.sent.id : null, rid: task.item ? task.item.id : undefined, sense: task.sense,
       verdict: out.verdict, res, sres: out.sres || null, ans: out.answer, shown: out.shown, picked: out.picked, typed: out.typed,
       ms: Date.now() - task.started, idk: !!out.idk, hint: !!task.hint, tapped: task.tapped,
       prior: !before.intro && stageBefore === 'none' && !task.hint,       // "knew it already" only counts without the hint
@@ -1149,7 +1319,7 @@
       miss = d[2];
       parts.push(el('div', { class: 'muted small', text: 'You typed' }), d[0], el('div', { class: 'muted small', text: 'The sentence' }));
     }
-    if (s) parts.push(sentView(s, { highlight: w, miss }), pinyinLine(s), el('div', { class: 'en', text: s.en }), ...phraseLines(s));
+    if (s) parts.push(sentView(s, { highlight: w, miss }), pinyinLine(s), el('div', { class: 'en', text: s.en }), ...phraseLines(s), alsoLine(s, w));
     else if (task.item) parts.push(readToks(task.item.t, { blank: task.at, fill: w }), enOf(task.item) ? el('div', { class: 'en small', text: enOf(task.item) }) : null);
     else {       // a question about the word alone still shows it in use
       const want = task.sense >= 0 ? sentsOf(w).filter(x => x[1] === task.sense) : [];
@@ -1158,7 +1328,7 @@
       });
     }
     const missed = out.idk || Object.keys(out.res || {}).some(p => p !== 'u' && !out.res[p].ok);
-    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : null).filter(Boolean));
+    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : null, out.ev).filter(Boolean));
     if (s) parts.push(el('div', { class: 'src', text: s.src === 'gw' ? 'Sentence: an example from the AllSet Learning Chinese Grammar Wiki (non-commercial use, with attribution).'
       : s.src === 'ted' ? 'Sentence: a subtitle line from a TED talk, with the English line it translates (OPUS TED2020; TED talks are CC BY-NC-ND). The pair was checked by a model, not by a person.'
       : 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
@@ -1409,7 +1579,7 @@
     const n = k => c[k] || 0;
     // more words to sort: this level first, then the levels above it (those only come into play if you mark them)
     const more = order.filter(x => status(x.w) === 'untouched' && !K.sorted[x.w]).map(x => x.w)
-      .concat(words.filter(x => x.lv > D.level && status(x.w) === 'beyond' && !K.sorted[x.w]).map(x => x.w));
+      .concat(words.filter(x => x.lv > D.level && !x.extra && status(x.w) === 'beyond' && !K.sorted[x.w]).map(x => x.w));
     const panel = el('div', { class: 'panel' },
       el('button', { class: 'plain', text: 'Close', onclick: () => { $('menu').hidden = true; } }),
       el('h3', { text: 'What the app thinks, level ' + D.level + ' (' + targets.length + ' words)' }),
@@ -1476,6 +1646,7 @@
   const deviceLabel = d => (devices[d] ? devices[d].os + ' ' + devices[d].kind + ' · ' + devices[d].browser : 'a device that has not described itself yet') + ' (' + d + ')';
   async function init() {
     await loadEvents();
+    events.forEach(e => { if ((e.k === 'look' || e.k === 'mark') && e.w && !byWord[e.w]) addExtra(e.w, e.p ? { p: e.p, g: e.g } : extraInfo(e.w)); });
     rebuild();
     const fresh = !events.length;
     const info = describeDevice(), sig = [info.os, info.browser, info.kind, info.screen, info.installed].join('|');
@@ -1491,6 +1662,8 @@
     ping: () => log({ k: 'ping' }).id,      // for testing: an event that changes nothing
     pace, devices: () => devices, mark, imports: () => applyImports(),
     // for testing: exam reading items on or off; put one on screen
+    vocab: () => showVocab(),
+    ease: () => ease(),
     reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.find(x => x.id === id)),
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },

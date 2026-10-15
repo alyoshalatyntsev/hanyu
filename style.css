@@ -200,7 +200,32 @@ header #status { flex: 1; text-align: center; }
 .under button.dont { color: var(--bad); }
 .under button:disabled { color: var(--muted); cursor: default; background: none; }
 button.hint.fb { margin: 10px auto 0; }
+button.vlink { display: block; margin: 12px auto 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 2px 0;
+  cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+button.vlink:hover { color: var(--fg); }
+.under2 { display: grid; grid-template-columns: 1fr 1.3fr 1fr; align-items: center; margin-top: 4px; }
+.under2 button.vlink { margin: 6px auto 0; }
+button.qlink { border: 0; background: none; font: inherit; font-size: 13px; color: var(--muted); padding: 8px 4px; cursor: pointer; }
+button.qlink:hover { color: var(--fg); }
+/* the vocab test */
+.vt { margin: 6px 0 14px; }
+.vrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) 3.2em; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.vrow.head { border-top: 0; font-size: 12px; color: var(--muted); padding-bottom: 2px; }
+.vrow .q.zh { font-family: var(--zh); font-size: 26px; }
+.vrow .q.en { font-size: 15px; }
+.vrow input[type=text] { font-size: 18px; padding: 7px 9px; }
+.vrow .c { text-align: center; }
+.vrow input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--bad); }
+.vmark { height: 38px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); font-size: 20px; cursor: pointer; }
+.vmark.right { color: var(--ok); background: var(--okbg); border-color: var(--ok); }
+.vmark.wrong, .vmark.idk { color: var(--bad); background: var(--badbg); border-color: var(--bad); }
+.vmark.hard { color: var(--ok); background: var(--okbg); border-color: var(--ok); font-size: 14px; }
+.under button.hardb { color: var(--unk); }
+.vmark.unsure { color: var(--unk); background: var(--unkbg); }
+.vans { color: var(--muted); padding: 0 0 6px; }
+.vans .zh { font-size: 18px; color: var(--fg); }
 .feedback .flags { margin-top: 6px; }
 .phrase { margin: -8px 0 12px; }
 .phrase.gram a { color: var(--accent); }
+.phrase.also .zh { color: var(--fg); font-size: 16px; cursor: pointer; }
 .phrase b { color: var(--fg); font-weight: 500; font-size: 16px; }
