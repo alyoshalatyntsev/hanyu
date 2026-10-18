@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 34;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 36;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -894,7 +894,10 @@
   // tests recall. A word met here for the first time is found out by it: typed right, it counts as known already.
   const VOCAB_N = 16;
   function vocabWords() {
-    const now = Date.now(), fresh = w => byWord[w] && !(K.w[w] && K.w[w].drop) && !(K.w[w] && K.w[w].vt && now - K.w[w].vt < SENT_REST);
+    // Not words of HSK 1 and 2: too easy (什么). A vague meaning (掉: "after a verb: completion, removal") stays in; each
+    // English-to-Chinese row has a hint for it.
+    const testable = w => byWord[w].lv >= 3;
+    const now = Date.now(), fresh = w => byWord[w] && testable(w) && !(K.w[w] && K.w[w].drop) && !(K.w[w] && K.w[w].vt && now - K.w[w].vt < SENT_REST);
     const want = w => (K.w[w] ? K.w[w].want || 0 : 0);
     const pick = [], add = (list, n) => { for (const w of list) { if (n <= 0) break; if (fresh(w) && !pick.includes(w)) { pick.push(w); n--; } } };
     const all = Object.keys(K.w);
@@ -924,6 +927,13 @@
     if ((byWord[v] && overlaps(byWord[v], byWord[w])) || (v.length > 1 && (v.includes(w) || w.includes(v)))) return 'unsure';
     return 'wrong';
   }
+  // a hint on an English-to-Chinese row: the first pinyin letter of the word; using it is recorded
+  function vocabHint(r) {
+    const word = byWord[r.w], first = ((word.n && word.n[0]) || (word.p && word.p[0]) || '').trim()[0] || '';
+    if (!first) return null;
+    const b = el('button', { class: 'hint vhint', text: 'hint', onclick: () => { r.hint = true; b.replaceWith(el('span', { class: 'muted small vhinted', text: ' starts with ' + first.toLowerCase() })); } });
+    return b;
+  }
   function showVocab() {
     current = null; idle = null;
     const rows = vocabWords().map(w => ({ w, dir: Math.random() < 0.5 ? 'zh' : 'en' }));      // zh: Chinese shown, write English
@@ -936,7 +946,7 @@
       r.idk = el('input', { type: 'checkbox', title: "I don't know" });
       r.idk.addEventListener('change', () => { r.inp.disabled = r.idk.checked; });
       r.row = el('div', { class: 'vrow', 'data-word': r.w, 'data-dir': r.dir },
-        r.dir === 'zh' ? wordEl('span', r.w, null, { class: 'q zh', text: r.w }, () => {}, true) : el('span', { class: 'q en', text: word.short }),
+        r.dir === 'zh' ? wordEl('span', r.w, null, { class: 'q zh', text: r.w }, () => {}, true) : el('span', { class: 'q en' }, word.short, vocabHint(r)),
         r.inp, el('label', { class: 'c' }, r.idk));
       table.append(r.row);
     });
@@ -975,8 +985,8 @@
         if (ok) right++; else not++;
         const t = r.dir === 'zh' ? 'vocabMean' : 'vocabWord';
         log({ k: 'ans', w: r.w, type: t, part: TASK[t].part, reason: before.stage === 'none' && !before.started ? 'findout' : null, sid: null, verdict: ok ? 'right' : 'wrong', res,
-          ans: r.ans, shown: r.dir === 'zh' ? r.w : byWord[r.w].short, auto: r.auto, fixed: r.mark !== r.auto && !(r.mark === 'hard' && r.auto === 'right'), hard: r.mark === 'hard', idk: r.auto === 'idk' && !ok, ms,
-          prior: !before.intro && before.stage === 'none' && !before.started, p: +pRight(r.w, t, new Date()).toFixed(3), vt: true });
+          ans: r.ans, shown: r.dir === 'zh' ? r.w : byWord[r.w].short, hint: !!r.hint, auto: r.auto, fixed: r.mark !== r.auto && !(r.mark === 'hard' && r.auto === 'right'), hard: r.mark === 'hard', idk: r.auto === 'idk' && !ok, ms,
+          prior: !before.intro && before.stage === 'none' && !before.started && !r.hint, p: +pRight(r.w, t, new Date()).toFixed(3), vt: true });
       });
       st.counter += rows.length; save();
       toast('Vocab test saved: ' + right + ' right, ' + not + ' not.');
@@ -1434,18 +1444,23 @@
     for (let i = x.t.length - 2; i > 0; i--) if (/[。！？…]$/.test(x.t[i])) { if (/[：:？?]$/.test(x.t.slice(i + 1).join(''))) x.t = x.t.slice(0, i + 1).concat(['\n', '★ '], x.t.slice(i + 1)); break; }
   });
   let follow = [];        // steps still to come on the passage just read
-  const KINDS = ['p', 'c', 'p', 'o', 'p', 'b'];        // passages come up most
+  // Turns go round: an HSK passage (p), a C3 dialogue (d), a film exchange (f), a gap with a word bank (c), three parts
+  // in order (o), building a sentence (b). Passages, dialogues and films come up most.
+  const KINDS = ['p', 'd', 'f', 'c', 'p', 'd', 'f', 'o', 'p', 'd', 'f', 'b'];
+  const FILM = D.film || [];
+  const kindOf = x => (x.src === 'C3' ? 'd' : x.k === 'n' ? 'f' : x.k);
   const isZh = w => /[一-鿿]/.test(w);
-  const itemToks = x => (x.t || []).concat(...(x.parts || []));
+  const itemToks = x => (x.t || []).concat(...(x.parts || []), ...(x.ctx || []));
   function pickReading() {
     const now = Date.now(), DAY = 86400000;
     const ok = x => !K.retired['r:' + x.id];
-    const fresh = R.filter(x => ok(x) && !K.read[x.id]);
+    const ALL = R.concat(FILM);
+    const fresh = ALL.filter(x => ok(x) && !K.read[x.id]);
     // done before: a missed one comes back after two days, a right one after two months
-    const again = R.filter(x => ok(x) && K.read[x.id] && now - K.read[x.id].t > (K.read[x.id].last ? 60 : 2) * DAY);
+    const again = ALL.filter(x => ok(x) && K.read[x.id] && now - K.read[x.id].t > (K.read[x.id].last ? 60 : 2) * DAY);
     st.readTurn = (st.readTurn || 0) + 1;
     const kind = KINDS[st.readTurn % KINDS.length];
-    const pool = [fresh.filter(x => x.k === kind), again.filter(x => x.k === kind), fresh, again].find(l => l.length);
+    const pool = [fresh.filter(x => kindOf(x) === kind), again.filter(x => kindOf(x) === kind), fresh, again].find(l => l.length);
     if (!pool) return null;
     // Of thirty taken at random: first the one that holds most words you are working on (up to three count), then the
     // one with the fewest other words you may not know.
@@ -1463,7 +1478,7 @@
       if (opt.hide && i >= opt.hide[0] && i < opt.hide[1]) { if (i === opt.hide[0]) line.append(el('span', { class: 'gap wide', text: '　　　　' })); return; }
       if (i === opt.blank) { line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' })); return; }
       if (opt.mark && i >= opt.mark[0] && i < opt.mark[1] && isZh(w)) { line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok target', text: w })); return; }
-      if (w === '\n') line.append(el('br'));
+      if (w === '\n' || w === '¶') line.append(el('br'));
       else if (w === '＿') line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' }));
       else if (isZh(w)) line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok', text: w }));
       else line.append(w);
@@ -1675,11 +1690,55 @@
       ...grammarLines(item.g),
       el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }),
       n < marks.length ? okayBar(out.refs) : null,
-      el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question' + (parts.qs.length > 1 ? 's ' : ' ') + parts.qs.map(q => q.id.split('-')[1]).join(' and ') + '.' }),
+      el('div', { class: 'src', text: paperLine(item, parts.qs) }),
       el('button', { class: 'primary', text: 'Next', onclick: goForward }));
     onEnter = goForward;
   }
+  // where an exam-style item comes from, for the result screen
+  function paperLine(item, qs) {
+    if (item.src === 'C3') return 'A dialogue and question from Chinese-as-a-foreign-language exams, from the C3 collection (github.com/nlpdata/c3, for research use). English by a model.';
+    if (item.src === 'film') return 'Film subtitles (OPUS OpenSubtitles 2018). The lines were checked and translated by a model, not by a person.';
+    const paper = (D.papers || {})[item.src] || {};
+    return 'HSK 4 paper ' + item.src + ', question' + (qs && qs.length > 1 ? 's ' + qs.map(q => q.id.split('-')[1]).join(' and ') : ' ' + item.id.split('-')[1]) +
+      (paper.official ? '' : ' (from a mock test said to be based on that paper)') + '. Tap any word for its pinyin and meaning.';
+  }
+  // ---------- film: three lines of a film, then "which line comes next?" or "what does the next line mean?" ----------
+  function showFilm(item, mode) {
+    mode = mode || ((st.filmTurn = (st.filmTurn || 0) + 1) % 2 ? 'next' : 'mean');
+    const task = current = { word: null, type: 'reading', item, film: mode, step: 'film-' + mode, started: Date.now(), done: false };
+    follow = [];
+    const ctx = el('div', { class: 'filmctx' }, item.ctx.map(c => el('div', { class: 'filmline' }, readToks(c))));
+    const pick = i => finishReading(task, { ok: i === item.a, ans: mode === 'next' ? item.o[i].join('') : item.en.o[i], pick: i });
+    let choices;
+    if (mode === 'next') {
+      choices = el('div', { class: 'choices' }, item.o.map((o, i) => el('button', { class: 'choice zh', text: o.join(''), onclick: () => pick(i) })));
+      screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film. Which line comes next?' }), ctx, choices, idkButton());
+    } else {
+      choices = el('div', { class: 'choices' }, item.en.o.map((o, i) => el('button', { class: 'choice', text: o, onclick: () => pick(i) })));
+      screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film and the one that came next. What does that last line mean?' }), ctx,
+        el('div', { class: 'filmline next' }, readToks(item.o[item.a])), choices, idkButton());
+    }
+    onDigit = pick;
+    idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
+  }
+  function showFilmResult(task, out) {
+    const item = task.item, right = item.o[item.a];
+    const note = el('input', { type: 'text', placeholder: 'note (optional)' });
+    const flush = noteSaver(note, () => ({ rid: item.id, ans: out.ans }));
+    const more = el('div', { class: 'feedback', hidden: '' }, el('div', { class: 'note' }, note));
+    screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
+      el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Wrong'),
+      item.ctx.map((c, i) => el('div', { class: 'filmline' }, readToks(c), el('div', { class: 'en small', text: item.en.ctx[i] }))),
+      el('div', { class: 'filmline next' }, readToks(right, { cls: 'ok' }), el('div', { class: 'en small', text: item.en.o[item.a] })),
+      !out.ok && !out.idk && out.pick != null ? el('div', { class: 'small muted' }, 'You chose: ', readToks(item.o[out.pick]), ' ' + item.en.o[out.pick]) : null,
+      !out.ok && !out.idk ? okayBar(out.refs) : null,
+      el('div', { class: 'src', text: paperLine(item) }),
+      el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }),
+      el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
+    onEnter = () => { flush(); goForward(); };
+  }
   function showReading(item, inFollow) {
+    if (item.k === 'n') return showFilm(item);
     if (item.k === 'p' && !inFollow) return showPassage(item);
     const task = current = { word: null, type: 'reading', item, step: inFollow ? 'more' : null, started: Date.now(), done: false };
     if (!inFollow) planFollow(item);
@@ -1741,6 +1800,7 @@
   }
   function showReadingResult(task, out) {
     if (task.multi) return showPassageResult(task, out);
+    if (task.film) return showFilmResult(task, out);
     const item = task.item, paper = (D.papers || {})[item.src] || {};
     if (task.step === 'bank') {            // the words put back: each gap right or wrong, the passage whole again
       const n = task.ws.filter((w, i) => out.filled[i] === w).length;
@@ -1782,7 +1842,7 @@
     parts.push(...grammarLines(item.g));
     if (!out.ok && !out.idk) parts.push(okayBar(out.refs));
     if (item.x) parts.push(el('div', { class: 'small explain' }, item.x, el('div', { class: 'muted', text: 'This explanation comes with the transcription of the paper, not from the paper. It has not been checked.' })));
-    parts.push(el('div', { class: 'src', text: 'HSK 4 paper ' + item.src + ', question ' + item.id.split('-')[1] + (paper.official ? '' : ' (from a mock test said to be based on that paper)') + '. Tap any word for its pinyin and meaning.' }));
+    parts.push(el('div', { class: 'src', text: paperLine(item) }));
     const flagRow = el('div', { class: 'flags' });
     ['bad item', 'dull', 'liked this', 'too hard'].forEach(f => {
       const b = el('button', { text: f, onclick: () => { const on = b.classList.toggle('on'); log({ k: 'flag', rid: item.id, flag: f, on }); } });
@@ -1813,6 +1873,7 @@
     const t = viewing >= 0 ? resume : null;
     viewing = -1; resume = null;
     if (t && t.multi) return showPassage(t.item, t.parts);
+    if (t && t.film) return showFilm(t.item, t.film);
     if (t && t.item) return t.step === 'sentence' ? showFollow({ step: 'sentence', item: t.item, span: t.span }) : t.step === 'bank' ? showFollow({ step: 'bank', item: t.item, ws: t.ws, at: t.at })
       : t.type === 'reading' ? showReading(t.item, t.step === 'more') : showFollow({ step: 'word', item: t.item, w: t.word, at: t.at });
     if (t) return showTask(t);
@@ -1937,11 +1998,11 @@
     // for testing: exam reading items on or off; put one on screen
     vocab: () => showVocab(),
     ease: () => ease(),
-    reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.find(x => x.id === id)),
+    reading: on => { st.noReading = !on; follow = []; save(); }, follow: () => follow.map(f => ({ step: f.step, w: f.w || null, rid: f.item.id, span: f.span || null })), read: id => showReading(R.concat(FILM).find(x => x.id === id)),
     // for testing: put one particular question on screen
     show: o => { current = { word: o.word, type: o.type, part: TASK[o.type].part, reason: null, extra: false, check: false, sent: S[o.sid], sense: -1, started: Date.now(), done: false }; showTask(current); },
     current: () => current && { rid: current.item ? current.item.id : null, step: current.step || null, span: current.span || null, ws: current.ws || (current.parts ? current.parts.ws : null),
-      multi: !!current.multi, tw: current.parts ? current.parts.tw : null, qa: current.parts ? current.parts.qs.map(q => [q.id, q.a]) : null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
+      film: current.film || null, fa: current.film ? current.item.a : null, multi: !!current.multi, tw: current.parts ? current.parts.tw : null, qa: current.parts ? current.parts.qs.map(q => [q.id, q.a]) : null, word: current.word, type: current.type, part: current.part, reason: current.reason, sid: current.sent ? current.sent.id : null, done: current.done },
     // for testing: move everything recorded n days into the past
     shiftDays: async n => { events.forEach(e => { e.t = new Date(new Date(e.t) - n * 86400000).toISOString(); }); await dbPut(events); st.retry = []; st.recent = []; save(); } };
   window.__app.ready = init().then(() => { window.__counterAtLoad = st.counter; window.__app.started = true; });
