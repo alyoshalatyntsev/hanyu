@@ -184,6 +184,7 @@ main h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0
 .filmline { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; margin: 6px 0; }
 .filmline .sent { font-size: 21px; margin: 0; }
 .filmline.next { border-left-color: var(--accent); }
+.filmline .speaker { float: left; margin: 6px 8px 0 0; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
 .filmline .en.small { margin: 0; }
 .sent.rd.ok { color: var(--ok); }
 .matchrow { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; border-top: 1px solid var(--line); padding: 4px 0; }
@@ -242,7 +243,8 @@ button.qlink:hover { color: var(--fg); }
 .vrow .q.zh { font-family: var(--zh); font-size: 26px; }
 .vrow .q.en { font-size: 15px; }
 .vrow button.vhint { display: inline; margin: 0 0 0 6px; }
-.vhinted { white-space: nowrap; }
+.vhinted { display: block; margin-top: 3px; font-size: 14px; color: var(--fg); }
+.vhinted b { font-size: 17px; color: var(--bad); }
 .vrow input[type=text] { font-size: 18px; padding: 7px 9px; }
 .vrow .c { text-align: center; }
 .vrow input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--bad); }

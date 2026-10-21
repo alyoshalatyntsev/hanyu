@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 37;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 40;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -412,6 +412,9 @@
     if (opt.seenOnly) c = c.filter(x => K.sent[x[0]] && K.sent[x[0]].seen);      // met before
     if (opt.needHit) c = c.filter(x => x[1] >= 0);
     if (opt.short) c = c.filter(x => !S[x[0]].long);      // longer sentences are for reading and gaps, not for tiles or retyping
+    // Since 21 October tiles only use the grammar examples graded by HSK level: Tatoeba and TED sentences can be put
+    // in order in too many equivalent ways (your note on 却).
+    if (opt.graded) c = c.filter(x => S[x[0]].src === 'gw');
     const r = K.w[w];
     if (c.length > 1 && r) c = c.filter(x => x[0] !== r.lastSent);
     if (!c.length) return null;
@@ -620,9 +623,9 @@
   function available(w) {
     const has = sentsOf(w).length > 0;
     if (!has) return byWord[w].extra ? ['meaningToWord'] : ['read', 'meaningToWord'];
-    const hit = !!pickSent(w, { needHit: true }), short = !!pickSent(w, { short: true });
+    const hit = !!pickSent(w, { needHit: true }), short = !!pickSent(w, { short: true }), graded = !!pickSent(w, { short: true, graded: true });
     const tilesLately = st.recent.slice(0, 4).some(x => x.type === 'tiles');       // tile order cannot be fully marked: at most one in five
-    const can = [hit && 'gap', short && !tilesLately && 'tiles', short && 'tilesType', hit && 'typedGap', short && 'retype', pickSent(w, { seenOnly: true, short: true }) && 'typeBack'].filter(Boolean);
+    const can = [hit && 'gap', graded && !tilesLately && 'tiles', graded && 'tilesType', hit && 'typedGap', short && 'retype', pickSent(w, { seenOnly: true, short: true }) && 'typeBack'].filter(Boolean);
     return can.length ? can : ['meaningToWord'];       // every sentence of the word has been shown today: ask for the word from its meaning instead
   }
   const COMPLEX = { gap: 1, read: 1, meaningToWord: 1, typedGap: 2, tilesType: 3, tiles: 3, retype: 4, typeBack: 5 };
@@ -644,7 +647,7 @@
   function makeTask(it) {
     const type = typeFor(it), w = it.w;
     const needsSent = !['read', 'tones', 'meaningToWord'].includes(type);
-    const pick = needsSent ? pickSent(w, { seenOnly: type === 'typeBack', needHit: type === 'gap' || type === 'typedGap', short: type !== 'gap' && type !== 'typedGap' }) : null;
+    const pick = needsSent ? pickSent(w, { seenOnly: type === 'typeBack', needHit: type === 'gap' || type === 'typedGap', short: type !== 'gap' && type !== 'typedGap', graded: type === 'tiles' || type === 'tilesType' }) : null;
     return { word: w, type, part: TASK[type] ? TASK[type].part : null, reason: it.reason || null, extra: !!it.extra, check: !!it.check,
       sent: pick ? S[pick[0]] : null, sense: pick ? pick[1] : (type === 'meaningToWord' ? nextMeaning(w) : -1), started: Date.now(), done: false };
   }
@@ -693,7 +696,7 @@
       node._want = log({ k: 'mark', w, v: 'want', src: 'click' }).id; node.classList.add('wanted');
       return toast(el('span', null, head, info, el('i', { text: '  · want to learn. Tap again to clear' })));
     }
-    const extra = !byWord[w] && addExtra(w, i);
+    const extra = !byWord[w] && !isName(w) && addExtra(w, i);
     const noted = !!byWord[w] && !(current && current.word === w);
     const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null, ...(byWord[w] && byWord[w].extra ? { p: i.p, g: i.g } : {}) });
     if (noted && node) { node.classList.add('noted'); node._look = ev.id; }
@@ -931,7 +934,7 @@
   function vocabHint(r) {
     const word = byWord[r.w], first = ((word.n && word.n[0]) || (word.p && word.p[0]) || '').trim()[0] || '';
     if (!first) return null;
-    const b = el('button', { class: 'hint vhint', text: 'hint', onclick: () => { r.hint = true; b.replaceWith(el('span', { class: 'muted small vhinted', text: ' starts with ' + first.toLowerCase() })); } });
+    const b = el('button', { class: 'hint vhint', text: 'hint', onclick: () => { r.hint = true; b.replaceWith(el('span', { class: 'vhinted' }, 'pinyin starts with ', el('b', { text: first.toLowerCase() }))); } });
     return b;
   }
   function showVocab() {
@@ -954,6 +957,7 @@
       r.cell.className = 'vmark ' + r.mark;
       r.cell.textContent = { right: '✓', hard: '✓ hard', wrong: '✗', unsure: '?', idk: '✗' }[r.mark];
     };
+    const vfb = feedbackBits(() => ({ step: 'vocab test', ws: rows.map(r => r.w) }));
     const check = () => {
       rows.forEach(r => {
         const a = r.inp.value.trim();
@@ -972,8 +976,8 @@
       });
       const n = k => rows.filter(r => r.mark === k).length;
       ok.replaceWith(el('div', { class: 'muted small', text: 'Tap a mark to change it: ✓, ✓ hard (right but it took effort), ✗. ' + n('right') + ' right, ' + (n('wrong') + n('idk')) + ' not, ' + n('unsure') + ' for you to decide (?).' }),
-        el('button', { class: 'primary', text: 'Save', onclick: save_ }));
-      onEnter = save_;
+        el('button', { class: 'primary', text: 'Save', onclick: () => { vfb.flush(); save_(); } }), vfb.parts);
+      onEnter = () => { vfb.flush(); save_(); };
     };
     const save_ = () => {
       const ms = Math.round((Date.now() - started) / rows.length);
@@ -1377,6 +1381,22 @@
 
   // a feedback note is saved when you leave the box, press Enter in it, or press Next (on a phone the box can vanish
   // before it would otherwise be saved)
+  // the quiet "Feedback" link under a result: flags (bad, dull, liked, too hard) and a note, about this exercise
+  // short things to tick under Feedback, from what the learner has complained about so far
+  const FLAGS = ['bad item', 'too easy', 'too hard', 'guessable without the Chinese', 'the English gives it away', 'marked unfairly', 'bad translation',
+    'unclear', 'seen too often', 'dull', 'liked this'];
+  function feedbackBits(about) {
+    const flagRow = el('div', { class: 'flags' });
+    FLAGS.forEach(f => {
+      const b = el('button', { text: f, onclick: () => { const on = b.classList.toggle('on'); log(Object.assign({ k: 'flag', flag: f, on }, about())); } });
+      flagRow.append(b);
+    });
+    const note = el('input', { type: 'text', placeholder: 'note (optional)' });
+    const flush = noteSaver(note, about);
+    const more = el('div', { class: 'feedback', hidden: '' }, flagRow, el('div', { class: 'note' }, note));
+    const link = el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } });
+    return { flush, parts: [link, more] };
+  }
   function noteSaver(note, about) {
     let saved = '';
     const flush = () => { const v = note.value.trim(); if (v && v !== saved) { saved = v; log(Object.assign({ k: 'note', note: v }, about())); toast('Note saved'); } };
@@ -1415,7 +1435,7 @@
       : 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
     // feedback is one quiet link; it opens the flags and the note
     const flagRow = el('div', { class: 'flags' });
-    const names = (s ? ['bad sentence'] : []).concat(['dull', 'liked this'], out.tiles && out.verdict === 'unchecked' ? ['my order may also be right'] : []);
+    const names = (s ? ['bad sentence'] : []).concat(FLAGS.filter(f => f !== 'bad item'), out.tiles && out.verdict === 'unchecked' ? ['my order may also be right'] : []);
     names.forEach(f => {
       const b = el('button', { text: f, onclick: () => {
         const on = b.classList.toggle('on');
@@ -1449,6 +1469,7 @@
   const KINDS = ['p', 'd', 'f', 'c', 'p', 'd', 'f', 'o', 'p', 'd', 'f', 'b'];
   const FILM = D.film || [];
   const kindOf = x => (x.src === 'C3' ? 'd' : x.k === 'n' ? 'f' : x.k);
+  const isName = w => !byWord[w] && !!(D.gloss || {})[w] && D.gloss[w][2] === 'n';      // 李校长, 小张: a name, not a word to learn
   const isZh = w => /[一-鿿]/.test(w);
   const itemToks = x => (x.t || []).concat(...(x.parts || []), ...(x.ctx || []));
   function pickReading() {
@@ -1480,7 +1501,7 @@
       if (opt.mark && i >= opt.mark[0] && i < opt.mark[1] && isZh(w)) { line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok target', text: w })); return; }
       if (w === '\n' || w === '¶') line.append(el('br'));
       else if (w === '＿') line.append(opt.fill ? el('span', { class: 'tok target filled', text: opt.fill }) : el('span', { class: 'gap', text: '　' }));
-      else if (isZh(w)) line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok', text: w }));
+      else if (isZh(w)) line.append(wordEl('span', w, byWord[w] ? null : GL[w] ? { p: GL[w][0], g: GL[w][1] } : null, { class: 'tok' + (isName(w) ? ' name' : ''), text: w }));
       else line.append(w);
     });
     return line;
@@ -1497,7 +1518,7 @@
     }
     return out;
   }
-  const answerLine = (text, cls) => readToks(zhToks(text), { cls: 'answerline ' + (cls || '') });
+  const answerLine = (text, cls, toks) => readToks(toks || zhToks(text), { cls: 'answerline ' + (cls || '') });
   // English for an exam item (a model's translation, prepared beforehand; the papers have none). Behind a button
   // while the question is open, and pressing it is recorded.
   const enOf = item => (item.k === 'o' ? (item.ep ? item.a.split('').map(c => item.ep[c]).join(' ') : '') : item.en) || '';
@@ -1669,6 +1690,7 @@
       qblocks, el('button', { class: 'primary', text: 'Check', onclick: go }), idkButton());
   }
   function showPassageResult(task, out) {
+    const fb = feedbackBits(() => ({ rid: task.item.id, step: 'questions' }));
     const item = task.item, parts = task.parts, ws = parts.ws, tn = ws.length;
     const marks = ws.map((w, i) => out.filled[i] === w).concat(parts.tw ? [out.typedMark === 'right'] : []).concat(parts.qs.map((q, qi) => out.chosen[qi] === q.a));
     const n = marks.filter(Boolean).length;
@@ -1683,16 +1705,16 @@
       enOf(item) ? el('div', { class: 'en small', text: enOf(item).split('\n★')[0] }) : '',
       parts.qs.map((q, qi) => el('div', { class: 'qblock' },
         el('div', { class: 'qline' }, readToks(q.t.slice(q.t.indexOf('\n') + 2))),
-        el('div', { class: 'vline ' + (out.chosen[qi] === q.a ? 'ok' : 'bad') }, el('b', { text: out.chosen[qi] === q.a ? '✓ ' : '✗ ' }), answerLine(q.o[q.a]),
-          out.chosen[qi] != null && out.chosen[qi] !== q.a ? [' you chose ', answerLine(q.o[out.chosen[qi]])] : out.chosen[qi] == null ? ' not answered' : '',
+        el('div', { class: 'vline ' + (out.chosen[qi] === q.a ? 'ok' : 'bad') }, el('b', { text: out.chosen[qi] === q.a ? '✓ ' : '✗ ' }), answerLine(q.o[q.a], '', q.ot && q.ot[q.a]),
+          out.chosen[qi] != null && out.chosen[qi] !== q.a ? [' you chose ', answerLine(q.o[out.chosen[qi]], '', q.ot && q.ot[out.chosen[qi]])] : out.chosen[qi] == null ? ' not answered' : '',
           q.eo ? el('span', { class: 'muted small', text: '  (' + q.eo[q.a] + ')' }) : null))),
       ws.length || parts.tw ? el('div', { class: 'small also' }, ws.concat(parts.tw ? [parts.tw] : []).flatMap((w, i) => [i ? ' · ' : '', el('b', { class: 'zh', text: w }), ' ' + readings(w) + ' ' + byWord[w].short])) : '',
       ...grammarLines(item.g),
       el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }),
       n < marks.length ? okayBar(out.refs) : null,
       el('div', { class: 'src', text: paperLine(item, parts.qs) }),
-      el('button', { class: 'primary', text: 'Next', onclick: goForward }));
-    onEnter = goForward;
+      el('button', { class: 'primary', text: 'Next', onclick: () => { fb.flush(); goForward(); } }), fb.parts);
+    onEnter = () => { fb.flush(); goForward(); };
   }
   // where an exam-style item comes from, for the result screen
   function paperLine(item, qs) {
@@ -1704,37 +1726,38 @@
   }
   // ---------- film: three lines of a film, then "which line comes next?" or "what does the next line mean?" ----------
   function showFilm(item, mode) {
-    mode = mode || ((st.filmTurn = (st.filmTurn || 0) + 1) % 2 ? 'next' : 'mean');
+    // "which line comes next?" was dropped on 21 October: from a few lines of a film the next one is guesswork (your notes)
+    mode = mode || 'mean';
     const task = current = { word: null, type: 'reading', item, film: mode, step: 'film-' + mode, started: Date.now(), done: false };
     follow = [];
-    const ctx = el('div', { class: 'filmctx' }, item.ctx.map(c => el('div', { class: 'filmline' }, readToks(c))));
+    // who says each line (A, B, ...), as a model judged it: subtitles do not say
+    const who = i => item.sp && item.sp[i] && item.sp[i] !== '?' ? el('b', { class: 'speaker', text: item.sp[i] }) : null;
+    const ctx = el('div', { class: 'filmctx' }, item.ctx.map((c, i) => el('div', { class: 'filmline' }, who(i), readToks(c))));
     const pick = i => finishReading(task, { ok: i === item.a, ans: mode === 'next' ? item.o[i].join('') : item.en.o[i], pick: i });
     let choices;
     if (mode === 'next') {
       choices = el('div', { class: 'choices' }, item.o.map((o, i) => el('button', { class: 'choice zh', text: o.join(''), onclick: () => pick(i) })));
-      screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film. Which line comes next?' }), ctx, choices, idkButton());
+      screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film. Which line comes next?' + (item.sp && item.sp[3] && item.sp[3] !== '?' ? ' (said by ' + item.sp[3] + ')' : '') }), ctx, choices, idkButton());
     } else {
       choices = el('div', { class: 'choices' }, item.en.o.map((o, i) => el('button', { class: 'choice', text: o, onclick: () => pick(i) })));
       screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film and the one that came next. What does that last line mean?' }), ctx,
-        el('div', { class: 'filmline next' }, readToks(item.o[item.a])), choices, idkButton());
+        el('div', { class: 'filmline next' }, who(3), readToks(item.o[item.a])), choices, idkButton());
     }
     onDigit = pick;
     idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
   }
   function showFilmResult(task, out) {
     const item = task.item, right = item.o[item.a];
-    const note = el('input', { type: 'text', placeholder: 'note (optional)' });
-    const flush = noteSaver(note, () => ({ rid: item.id, ans: out.ans }));
-    const more = el('div', { class: 'feedback', hidden: '' }, el('div', { class: 'note' }, note));
+    const spk = i => item.sp && item.sp[i] && item.sp[i] !== '?' ? el('b', { class: 'speaker', text: item.sp[i] }) : null;
+    const fb = feedbackBits(() => ({ rid: item.id, step: task.step, ans: out.ans })), flush = fb.flush;
     screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
       el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Wrong'),
-      item.ctx.map((c, i) => el('div', { class: 'filmline' }, readToks(c), el('div', { class: 'en small', text: item.en.ctx[i] }))),
-      el('div', { class: 'filmline next' }, readToks(right, { cls: 'ok' }), el('div', { class: 'en small', text: item.en.o[item.a] })),
+      item.ctx.map((c, i) => el('div', { class: 'filmline' }, spk(i), readToks(c), el('div', { class: 'en small', text: item.en.ctx[i] }))),
+      el('div', { class: 'filmline next' }, spk(3), readToks(right, { cls: 'ok' }), el('div', { class: 'en small', text: item.en.o[item.a] })),
       !out.ok && !out.idk && out.pick != null ? el('div', { class: 'small muted' }, 'You chose: ', readToks(item.o[out.pick]), ' ' + item.en.o[out.pick]) : null,
       !out.ok && !out.idk ? okayBar(out.refs) : null,
       el('div', { class: 'src', text: paperLine(item) }),
-      el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }),
-      el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
+      el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }), fb.parts);
     onEnter = () => { flush(); goForward(); };
   }
   function showReading(item, inFollow) {
@@ -1754,7 +1777,7 @@
       // The order alone can often be guessed from the shape of the parts ("大家都知道" comes first). So, where the English
       // of the parts is there, each English line is also matched to its part: that needs the Chinese understood.
       let order = null;
-      const match = {}, eng = item.ep ? shuffle(['A', 'B', 'C']) : [];
+      const match = {}, eng = [];      // (matching each part to its English was taken out on 21 October: the English gave the order away)
       const permBox = el('div', { class: 'choices three' }, PERMS.map(o => el('button', { class: 'choice', text: o, onclick: e => {
         order = o; [...permBox.children].forEach(b => b.classList.toggle('picked', b === e.currentTarget)); } })));
       const matchRows = eng.map(c => {
@@ -1803,6 +1826,7 @@
     if (task.film) return showFilmResult(task, out);
     const item = task.item, paper = (D.papers || {})[item.src] || {};
     if (task.step === 'bank') {            // the words put back: each gap right or wrong, the passage whole again
+      const fbb = feedbackBits(() => ({ rid: item.id, step: 'bank' }));
       const n = task.ws.filter((w, i) => out.filled[i] === w).length;
       screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
         el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : n + ' of ' + task.ws.length + ' right'),
@@ -1811,8 +1835,8 @@
         enOf(item) ? el('div', { class: 'en small', text: enOf(item) }) : '',
         el('div', { class: 'small also' }, task.ws.map((w, i) => [i ? ' · ' : '', el('b', { class: 'zh', text: w }), ' ' + readings(w) + ' ' + byWord[w].short]).flat()),
         !out.ok && !out.idk ? okayBar(out.refs) : null,
-        el('button', { class: 'primary', text: 'Next', onclick: goForward }));
-      onEnter = goForward;
+        el('button', { class: 'primary', text: 'Next', onclick: () => { fbb.flush(); goForward(); } }), fbb.parts);
+      onEnter = () => { fbb.flush(); goForward(); };
       return;
     }
     if (task.step === 'sentence') {        // the sentence typed from memory: the same, or shown against the passage's own
@@ -1832,7 +1856,7 @@
       !out.ok && !out.idk && item.k === 'b' ? el('span', { class: 'why', text: 'Not the sentence in the paper\'s answer key.' }) : null)];
     if (!out.ok && !out.idk) parts.push(el('div', { class: 'muted small', text: 'Your answer' }), el('div', { class: 'yours typed', text: out.ans }));
     if (item.k === 'c') parts.push(readToks(item.t, { fill: right }), el('div', { class: 'small muted', text: 'The words to choose from:' }), answerLine(item.o.join('　')));
-    else if (item.k === 'p') parts.push(readToks(item.t), answerLine(right, 'ok'));
+    else if (item.k === 'p') parts.push(readToks(item.t), answerLine(right, 'ok', item.ot && item.ot[item.a]));
     else if (item.k === 'o') parts.push(el('div', { class: 'muted small', text: 'The order is ' + right.split('').join(', ') + (out.order && out.order !== item.a ? ' (you chose ' + out.order.split('').join(', ') + ')' : '') +
         (out.eng && out.eng.length ? '. Matching the English: ' + out.eng.filter(c => out.match[c] === c).length + ' of 3 right' + (out.matchOk ? '' : ' (' + out.eng.map(c => (item.ep[c] || '').slice(0, 24) + '… is ' + c).join('; ') + ')') : '') }),
       readToks([].concat(...right.split('').map((c, i) => (i ? ['，'] : []).concat(item.parts['ABC'.indexOf(c)]))).concat(['。'])));
@@ -1844,7 +1868,7 @@
     if (item.x) parts.push(el('div', { class: 'small explain' }, item.x, el('div', { class: 'muted', text: 'This explanation comes with the transcription of the paper, not from the paper. It has not been checked.' })));
     parts.push(el('div', { class: 'src', text: paperLine(item) }));
     const flagRow = el('div', { class: 'flags' });
-    ['bad item', 'dull', 'liked this', 'too hard'].forEach(f => {
+    FLAGS.forEach(f => {
       const b = el('button', { text: f, onclick: () => { const on = b.classList.toggle('on'); log({ k: 'flag', rid: item.id, flag: f, on }); } });
       flagRow.append(b);
     });
