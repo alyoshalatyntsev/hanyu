@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 36;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 37;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -1916,8 +1916,17 @@
     // more words to sort: this level first, then the levels above it (those only come into play if you mark them)
     const more = order.filter(x => status(x.w) === 'untouched' && !K.sorted[x.w]).map(x => x.w)
       .concat(words.filter(x => x.lv > D.level && !x.extra && status(x.w) === 'beyond' && !K.sorted[x.w]).map(x => x.w));
+    // the word of the question on screen: "I don't want to learn it" (it is then not shown again; undo from its own menu)
+    const qw = current && current.word && byWord[current.word] && !(K.w[current.word] && K.w[current.word].drop) ? current.word : null;
     const panel = el('div', { class: 'panel' },
       el('button', { class: 'plain', text: 'Close', onclick: () => { $('menu').hidden = true; } }),
+      qw ? el('button', { class: 'plain', text: "I don't want to learn " + qw, onclick: () => {
+        $('menu').hidden = true;
+        log({ k: 'mark', w: qw, v: 'nowant', src: 'menu' });
+        const asked = current && !current.done && current.word === qw;
+        mark(qw, 'drop', 'menu');
+        if (!asked) toast(qw + ': not shown again');
+      } }) : null,
       el('h3', { text: 'What the app thinks, level ' + D.level + ' (' + targets.length + ' words)' }),
       el('div', { class: 'small counts' },
         [['marked trivially easy', n('easy')], ['known (typed right on two days)', n('known')], ['typed right today, to be asked again another day', n('resting')], ['in play', n('learning')], ['waiting to be taught', n('wait')],
@@ -1941,13 +1950,7 @@
       (window.HANYU && !window.HANYU.local) ? el('button', { class: 'plain', text: 'Forget the token on this device', onclick: () => {
         if (confirm('Remove the token and the downloaded words from this device? Your progress stays.')) window.HANYU.forget();
       } }) : null,
-      el('button', { class: 'plain', text: 'Reset all progress', onclick: () => {
-        if (confirm('Start again from nothing, on every device? (The record of what you did is kept, but no longer counts.)')) {
-          log({ k: 'reset' });
-          Object.assign(st, { counter: 0, retry: [], recent: [], turn: 0 }); save();
-          applyImports(); $('menu').hidden = true; advance();
-        }
-      } }),
+      // ("Reset all progress" was taken out on 21 October, at the learner's request.)
       el('h3', { text: 'Where the content comes from' }),
       el('div', { class: 'small muted', text: 'Words, pinyin and definitions: official 2012 HSK lists as published at hskhsk.com (levels 1 to ' + (D.dataLevel || D.level) + '; level ' + D.level + ' is the one being worked through). Sentences: ' +
         D.stats.sentences + ', most from Tatoeba, written by self-declared native Mandarin speakers and limited to these words (CC BY 2.0 FR), ' + (D.stats.fromGrammarWiki || 0) +
