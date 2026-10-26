@@ -261,3 +261,16 @@ button.qlink:hover { color: var(--fg); }
 .phrase.gram a { color: var(--accent); }
 .phrase.also .zh { color: var(--fg); font-size: 16px; cursor: pointer; }
 .phrase b { color: var(--fg); font-weight: 500; font-size: 16px; }
+
+/* film: one block per run of lines by the same speaker, coloured by speaker */
+.filmblock { border-left: 4px solid var(--line); padding: 4px 0 4px 10px; margin: 6px 0; --sp: var(--muted); border-left-color: var(--sp); }
+.filmblock .sent { display: inline; font-size: 21px; margin: 0 6px 0 0; }
+.filmblock .sent.last, .filmblock .sent.ok { font-weight: 600; }
+.filmblock .speaker { float: left; margin: 2px 8px 0 0; font-size: 12px; color: var(--sp); border: 1px solid var(--sp); border-radius: 999px; padding: 0 7px; }
+.filmblock .en.small { margin: 2px 0 0; clear: both; }
+.filmblock.sp-0 { --sp: #2f6fd0; background: #eef4fd; }
+.filmblock.sp-1 { --sp: #c46a12; background: #fdf3e8; }
+.filmblock.sp-2 { --sp: #2b8a4b; background: #eaf7ee; }
+.filmblock.sp-3 { --sp: #8a3fb0; background: #f5edfa; }
+.filmblock.sp-4 { --sp: #b0344f; background: #fbedf0; }
+.filmblock.sp-5 { --sp: #1b8a8a; background: #e8f6f6; }

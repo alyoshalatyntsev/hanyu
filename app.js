@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   const D = window.DATA, F = window.FSRS;
-  const RELEASE = 40;         // shown in the menu; goes up with the cache name in sw.js
+  const RELEASE = 41;         // shown in the menu; goes up with the cache name in sw.js
   const SENT_REST = 20 * 3600000;      // a sentence is not shown again within this time
   const TARGET_R = 0.85;      // aim to remember about 85% at the moment of review
   const DUE_THRESHOLD = 15;   // nothing new while this many parts are below target
@@ -117,7 +117,7 @@
       x.last = !!ok; x.t = +new Date(ev.t);
       return;
     }
-    if (ev.k === 'flag' && ev.rid) { if (ev.flag === 'bad item') { if (ev.on) K.retired['r:' + ev.rid] = true; else delete K.retired['r:' + ev.rid]; } return; }
+    if (ev.k === 'flag' && ev.rid) { if (ev.flag === 'bad item' || ev.flag === 'dont care') { if (ev.on) K.retired['r:' + ev.rid] = true; else delete K.retired['r:' + ev.rid]; } return; }
     if (ev.k === 'flag') { if (ev.flag === 'bad sentence' && ev.sid) { if (ev.on) K.retired[ev.sid] = true; else delete K.retired[ev.sid]; } return; }
     if (!ev.w) return;
     const r = rec(ev.w);
@@ -697,7 +697,7 @@
       return toast(el('span', null, head, info, el('i', { text: '  · want to learn. Tap again to clear' })));
     }
     const extra = !byWord[w] && !isName(w) && addExtra(w, i);
-    const noted = !!byWord[w] && !(current && current.word === w);
+    const noted = !!byWord[w] && !(current && !current.done && current.word === w);
     const ev = log({ k: 'look', w, noted, during: !!(current && !current.done), sid: current && current.sent ? current.sent.id : null, ...(byWord[w] && byWord[w].extra ? { p: i.p, g: i.g } : {}) });
     if (noted && node) { node.classList.add('noted'); node._look = ev.id; }
     toast(el('span', null, head, info, noted ? el('i', { text: '  · noted as not known. Tap again: want to learn' }) : ''),
@@ -1082,7 +1082,7 @@
       wordEl('span', w, null, { class: 'h', text: w }), el('span', { class: 'pinyin', text: readings(w) }),
       defView(word, 'def'),
       el('div', { class: 'parts' }, Object.keys(PARTS).map(one))),
-      ctx === 'missed' || ctx === 'unchecked' ? missedOffers(w, r, ansEv, ctx) : null,
+      ctx === 'missed' || ctx === 'unchecked' || ctx === 'wrong' ? missedOffers(w, r, ansEv, ctx) : null,
       ctx === 'right' ? rightOffers(w, r, ansEv) : null];
   }
   // after a right answer: "Trivially easy", and "Hard" (right, but it took effort: held less firmly than a plain right)
@@ -1103,6 +1103,16 @@
       rebuild();
     });
     return b;
+  }
+  // "I don't care": the word is not shown again (as "I don't want to learn" in the menu); a reading item is retired
+  function careBar(w, rid, before) {
+    const b = el('button', { class: 'dont', text: "I don't care", onclick: () => {
+      if (before) before();
+      if (w && byWord[w]) { log({ k: 'mark', w, v: 'nowant', src: 'care' }); mark(w, 'drop', 'care'); }
+      else if (rid) log({ k: 'flag', rid, flag: 'dont care', on: true });
+      goForward();
+    } });
+    return el('div', { class: 'under one' }, b);
   }
   const okayBar = evs => { const b = okayButton(evs); return b ? el('div', { class: 'under one' }, b) : null; };
   function rightOffers(w, r, ansEv) {
@@ -1373,6 +1383,8 @@
     if (missedWord && st.cool[w].fails < 2 && K.w[w].stage !== 'wait') st.retry.push({ w, at: st.counter + 8 + rand(4) });
     if (task.slow && !st.retry.some(x => x.w === w) && K.w[w].stage !== 'wait') st.retry.push({ w, at: st.counter + 4 });      // "slower": this word comes round again soon
     st.recent.unshift({ w, type: task.type }); st.recent.length = Math.min(st.recent.length, 5);
+    // a short sentence with a word to put in: half the time the same sentence comes straight back to be read, hidden and retyped
+    if ((task.type === 'gap' || task.type === 'typedGap') && task.sent && !task.sent.long && !task.check && !missedWord && Math.random() < 0.5) follow.unshift({ step: 'retype', w, sent: task.sent });
     save();
     hist.push({ task, out }); if (hist.length > 30) hist.shift();
     viewing = -1;
@@ -1429,7 +1441,7 @@
       });
     }
     const missed = out.idk || Object.keys(out.res || {}).some(p => p !== 'u' && !out.res[p].ok);
-    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : out.verdict === 'unchecked' ? 'unchecked' : null, out.ev).filter(Boolean));
+    parts.push(...wordCard(w, missed ? 'missed' : out.verdict === 'right' ? 'right' : out.verdict === 'unchecked' ? 'unchecked' : out.verdict === 'wrong' ? 'wrong' : null, out.ev).filter(Boolean));
     if (s) parts.push(el('div', { class: 'src', text: s.src === 'gw' ? 'Sentence: an example from the AllSet Learning Chinese Grammar Wiki (non-commercial use, with attribution).'
       : s.src === 'ted' ? 'Sentence: a subtitle line from a TED talk, with the English line it translates (OPUS TED2020; TED talks are CC BY-NC-ND). The pair was checked by a model, not by a person.'
       : 'Sentence: Tatoeba #' + s.id + ', by ' + s.by + ' (CC BY 2.0 FR).' }));
@@ -1448,7 +1460,7 @@
     const more = el('div', { class: 'feedback', hidden: '' }, flagRow, el('div', { class: 'note' }, note));
     const link = el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } });
     const next = () => { flush(); goForward(); };
-    parts.push(el('button', { class: 'primary', text: 'Next', onclick: next }), link, more);
+    parts.push(el('button', { class: 'primary', text: 'Next', onclick: next }), careBar(w, null, flush), link, more);
     screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '', parts);
     onEnter = () => { if (document.activeElement === note) flush(); else next(); };
   }
@@ -1560,6 +1572,7 @@
   }
   function showFollow(f) {
     const item = f.item;
+    if (f.step === 'retype') return showTask({ word: f.w, type: 'retype', part: 'u', reason: null, extra: false, check: false, sent: f.sent, sense: -1, started: Date.now(), done: false });
     if (f.step === 'more') return showReading(item, true);
     if (f.step === 'bank') {
       const task = current = { word: null, type: 'reading', item, step: 'bank', ws: f.ws, at: f.at, started: Date.now(), done: false };
@@ -1713,7 +1726,7 @@
       el('div', { class: 'muted small', text: 'English by a model, prepared beforehand; the paper has none.' }),
       n < marks.length ? okayBar(out.refs) : null,
       el('div', { class: 'src', text: paperLine(item, parts.qs) }),
-      el('button', { class: 'primary', text: 'Next', onclick: () => { fb.flush(); goForward(); } }), fb.parts);
+      el('button', { class: 'primary', text: 'Next', onclick: () => { fb.flush(); goForward(); } }), careBar(null, task.item.id, fb.flush), fb.parts);
     onEnter = () => { fb.flush(); goForward(); };
   }
   // where an exam-style item comes from, for the result screen
@@ -1725,14 +1738,26 @@
       (paper.official ? '' : ' (from a mock test said to be based on that paper)') + '. Tap any word for its pinyin and meaning.';
   }
   // ---------- film: three lines of a film, then "which line comes next?" or "what does the next line mean?" ----------
+  // lines of the same speaker run on in one block, with no gaps; each speaker has a colour. lines: [{ sp, zh: tokens, en?, cls? }]
+  function filmBlocks(lines) {
+    const groups = [];
+    lines.forEach(l => {
+      const sp = l.sp && l.sp !== '?' ? l.sp : '?', g = groups[groups.length - 1];
+      if (g && g.sp === sp) g.lines.push(l); else groups.push({ sp, lines: [l] });
+    });
+    return groups.map(g => el('div', { class: 'filmblock sp-' + (g.sp === '?' ? 'q' : (g.sp.charCodeAt(0) - 65) % 6) },
+      g.sp !== '?' ? el('b', { class: 'speaker', text: g.sp }) : null,
+      g.lines.map(l => readToks(l.zh, { cls: l.cls })),
+      g.lines.some(l => l.en) ? el('div', { class: 'en small', text: g.lines.map(l => l.en).filter(Boolean).join(' ') }) : null));
+  }
   function showFilm(item, mode) {
     // "which line comes next?" was dropped on 21 October: from a few lines of a film the next one is guesswork (your notes)
     mode = mode || 'mean';
     const task = current = { word: null, type: 'reading', item, film: mode, step: 'film-' + mode, started: Date.now(), done: false };
     follow = [];
     // who says each line (A, B, ...), as a model judged it: subtitles do not say
-    const who = i => item.sp && item.sp[i] && item.sp[i] !== '?' ? el('b', { class: 'speaker', text: item.sp[i] }) : null;
-    const ctx = el('div', { class: 'filmctx' }, item.ctx.map((c, i) => el('div', { class: 'filmline' }, who(i), readToks(c))));
+    const sp = i => item.sp && item.sp[i];
+    const ctx = el('div', { class: 'filmctx' }, filmBlocks(item.ctx.map((c, i) => ({ sp: sp(i), zh: c }))));
     const pick = i => finishReading(task, { ok: i === item.a, ans: mode === 'next' ? item.o[i].join('') : item.en.o[i], pick: i });
     let choices;
     if (mode === 'next') {
@@ -1740,24 +1765,23 @@
       screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film. Which line comes next?' + (item.sp && item.sp[3] && item.sp[3] !== '?' ? ' (said by ' + item.sp[3] + ')' : '') }), ctx, choices, idkButton());
     } else {
       choices = el('div', { class: 'choices' }, item.en.o.map((o, i) => el('button', { class: 'choice', text: o, onclick: () => pick(i) })));
-      screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film and the one that came next. What does that last line mean?' }), ctx,
-        el('div', { class: 'filmline next' }, who(3), readToks(item.o[item.a])), choices, idkButton());
+      screen('reading', el('div', { class: 'prompt', text: 'Three lines from a film and the one that came next. What does that last line mean?' }),
+        el('div', { class: 'filmctx' }, filmBlocks(item.ctx.map((c, i) => ({ sp: sp(i), zh: c })).concat([{ sp: sp(3), zh: item.o[item.a], cls: 'last' }]))), choices, idkButton());
     }
     onDigit = pick;
     idkNow = () => finishReading(task, { ok: false, idk: true, ans: '' });
   }
   function showFilmResult(task, out) {
     const item = task.item, right = item.o[item.a];
-    const spk = i => item.sp && item.sp[i] && item.sp[i] !== '?' ? el('b', { class: 'speaker', text: item.sp[i] }) : null;
     const fb = feedbackBits(() => ({ rid: item.id, step: task.step, ans: out.ans })), flush = fb.flush;
     screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '',
       el('div', { class: 'verdict ' + (out.idk ? 'unchecked' : out.ok ? 'right' : 'wrong') }, out.idk ? 'Here it is' : out.ok ? 'Right' : 'Wrong'),
-      item.ctx.map((c, i) => el('div', { class: 'filmline' }, spk(i), readToks(c), el('div', { class: 'en small', text: item.en.ctx[i] }))),
-      el('div', { class: 'filmline next' }, spk(3), readToks(right, { cls: 'ok' }), el('div', { class: 'en small', text: item.en.o[item.a] })),
+      el('div', { class: 'filmctx' }, filmBlocks(item.ctx.map((c, i) => ({ sp: item.sp && item.sp[i], zh: c, en: item.en.ctx[i] }))
+        .concat([{ sp: item.sp && item.sp[3], zh: right, cls: 'ok last', en: item.en.o[item.a] }]))),
       !out.ok && !out.idk && out.pick != null ? el('div', { class: 'small muted' }, 'You chose: ', readToks(item.o[out.pick]), ' ' + item.en.o[out.pick]) : null,
       !out.ok && !out.idk ? okayBar(out.refs) : null,
       el('div', { class: 'src', text: paperLine(item) }),
-      el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }), fb.parts);
+      el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }), careBar(null, item.id, flush), fb.parts);
     onEnter = () => { flush(); goForward(); };
   }
   function showReading(item, inFollow) {
@@ -1816,6 +1840,11 @@
     const item = task.item;
     st.counter++; st.sinceReading = 0;
     out.refs = (out.refs || []).concat([log({ k: 'read', rid: item.id, kind: item.k, src: item.src, step: task.step || null, ok: !!out.ok, ans: out.ans, ms: Date.now() - task.started, idk: !!out.idk, en: !!task.en })]);
+    if (task.film === 'mean') {       // then the last line once more, with one word of it to type (the one most worth learning)
+      const toks = item.o[item.a], rank = w => (byWord[w].lv === D.level ? 0 : byWord[w].lv >= 3 ? 1 : 2) + (['easy', 'drop', 'known'].includes(status(w)) ? 5 : 0);
+      const cand = toks.map((w, i) => ({ w, i })).filter(x => isZh(x.w) && byWord[x.w] && toks.indexOf(x.w) === toks.lastIndexOf(x.w)).sort((a, b) => rank(a.w) - rank(b.w));
+      follow = cand.length && rank(cand[0].w) < 5 ? [{ step: 'word', item: { id: item.id, k: 'n', src: 'film', t: toks, en: item.en.o[item.a] }, w: cand[0].w, at: cand[0].i }] : [];
+    }
     save();
     hist.push({ task, out }); if (hist.length > 30) hist.shift();
     viewing = -1;
@@ -1875,7 +1904,7 @@
     const note = el('input', { type: 'text', placeholder: 'note (optional)' });
     const flush = noteSaver(note, () => ({ rid: item.id, ans: out.ans }));
     const more = el('div', { class: 'feedback', hidden: '' }, flagRow, el('div', { class: 'note' }, note));
-    parts.push(el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }), el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
+    parts.push(el('button', { class: 'primary', text: 'Next', onclick: () => { flush(); goForward(); } }), careBar(null, item.id, flush), el('button', { class: 'hint fb', text: 'Feedback', onclick: () => { more.hidden = !more.hidden; } }), more);
     screen(viewing >= 0 && viewing < hist.length - 1 ? 'looking back' : '', parts);
     onEnter = goForward;
   }
